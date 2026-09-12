@@ -9,6 +9,7 @@ import { startRun } from "../runner.ts";
 import { newRunId, createRunDir } from "../rundir.ts";
 import { createRegistry, uniqueName, type RunRegistry } from "./runs.ts";
 import { discoverAgentDefs, type AgentDef } from "../agentdef.ts";
+import { createWorktree, type Worktree } from "../worktree.ts";
 
 /**
  * Shell out to `omp` and return its stdout, trimmed. Every tool that talks to
@@ -126,17 +127,20 @@ export function createServer(opts: CreateServerOptions = {}): McpServer {
           "description when omitted. An explicit name already in use is an error naming " +
           "the run that already has it — it is never silently suffixed.",
       ),
-      isolation: z.string().optional().describe(
-        "Worktree isolation mode, kept for parity with Agent. Not implemented yet — every " +
-          "dispatch runs directly in workdir.",
+      isolation: z.enum(["none", "worktree"]).optional().describe(
+        "'none' (default) runs in workdir, like a native subagent. 'worktree' gives the " +
+          "run its own git checkout so it can write freely without touching your working " +
+          "tree — the same guarantee Agent's isolation: \"worktree\" offers. An unchanged " +
+          "worktree is cleaned up; one the agent left work in is kept and its path reported.",
       ),
       workdir: z.string().optional().describe(
         "Absolute path the agent runs in. Defaults to this MCP server process's own " +
           "working directory.",
       ),
     },
-    async ({ description, prompt, subagent_type, model, name, workdir }, extra) => {
-      const targetWorkdir = workdir ?? process.cwd();
+    async ({ description, prompt, subagent_type, model, name, isolation, workdir }, extra) => {
+      const baseWorkdir = workdir ?? process.cwd();
+      let targetWorkdir = baseWorkdir;
 
       // Resolved BEFORE any run starts, so a refusal costs nothing.
       let def: AgentDef | undefined;
@@ -182,7 +186,14 @@ export function createServer(opts: CreateServerOptions = {}): McpServer {
       reserved.add(runName);
 
       let progressTimer: ReturnType<typeof setInterval> | undefined;
+      let worktree: Worktree | undefined;
       try {
+        // After the agent-definition checks above, so a refusal never leaves a
+        // worktree behind, and before the run, so it is what the agent runs in.
+        if (isolation === "worktree") {
+          worktree = await createWorktree(baseWorkdir, runName);
+          targetWorkdir = worktree.path;
+        }
         const home = process.env.HOME ?? "";
         const cfg = loadTierConfig([
           join(home, ".omp-dispatch", "config.json"),
@@ -282,8 +293,16 @@ export function createServer(opts: CreateServerOptions = {}): McpServer {
           `tool_calls=${result.tool_calls} cost_usd=${result.cost_usd.toFixed(4)} ` +
           `seconds=${result.seconds} stopped_because=${result.stopped_because}`;
 
+        let isolationNote = "";
+        if (worktree) {
+          const { removed, path } = await worktree.cleanup();
+          isolationNote = removed
+            ? `\n[omp:${runName}] worktree was clean and has been removed`
+            : `\n[omp:${runName}] worktree kept — the agent left work in ${path}`;
+        }
+
         return {
-          content: [{ type: "text", text: (result.last_reply ?? "(no reply)") + footer }],
+          content: [{ type: "text", text: (result.last_reply ?? "(no reply)") + footer + isolationNote }],
         };
       } finally {
         clearInterval(progressTimer);

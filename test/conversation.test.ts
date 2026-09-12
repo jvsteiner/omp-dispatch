@@ -190,3 +190,33 @@ test("stopping a run that is asking settles it rather than hanging", async () =>
   const settled = await inFlight;          // must not hang
   expect(settled.content[0].text).toContain("aborted");
 }, 40_000);
+
+// --- worktree isolation ----------------------------------------------------
+
+test("isolation: worktree runs the agent in its own checkout", async () => {
+  const { mkdtempSync: mk, writeFileSync: wf } = await import("node:fs");
+  const repo = mk(join(tmpdir(), "omp-iso-"));
+  await Bun.$`git init -q`.cwd(repo).quiet();
+  wf(join(repo, "seed.txt"), "seed\n");
+  await Bun.$`git add -A`.cwd(repo).quiet();
+  await Bun.$`git -c user.email=t@t -c user.name=t commit -qm init`.cwd(repo).quiet();
+
+  process.env.FAKE_OMP_SCRIPT = JSON.stringify({});
+  const c = await connect();
+  const r = await dispatch(c, { name: "isolated", isolation: "worktree", workdir: repo });
+  expect(r.isError).toBeFalsy();
+  expect(r.content[0].text).toContain("worktree");
+
+  // The agent wrote nothing, so the main tree must be untouched.
+  const status = await Bun.$`git status --porcelain`.cwd(repo).quiet();
+  expect(status.stdout.toString().trim()).toBe("");
+}, 40_000);
+
+test("isolation: worktree on a non-repo errors instead of running unisolated", async () => {
+  const { mkdtempSync: mk } = await import("node:fs");
+  const notRepo = mk(join(tmpdir(), "omp-iso-bare-"));
+  const c = await connect();
+  const r = await dispatch(c, { name: "norepo", isolation: "worktree", workdir: notRepo });
+  expect(r.isError).toBe(true);
+  expect(JSON.stringify(r.content)).toContain("run without isolation");
+}, 40_000);

@@ -26,7 +26,7 @@ Branch `build/omp-dispatch-m1-m4`, HEAD `c28416c`, **66 tests passing**. v1 Task
 ## Global Constraints
 
 - bun ≥ 1.4.0, TypeScript, `bun:test` only. macOS and Linux.
-- **No test may call a model provider** except the smoke test in Task 10.
+- **No test may call a model provider** except the smoke test in Task 11.
 - Counts and cost come from `getSessionStats()`. Never count frames for a number.
 - A turn completes only on `agent_end` where `isTerminal !== false`.
 - **Caps are `>=` on every axis.** Permissive at a boundary is the one direction they must not fail.
@@ -508,7 +508,7 @@ Returns the agent's final report as text, followed by a compact footer.
    omp model id such as `deepseek/deepseek-v4-pro`. Run `omp_models` to see what is
    available."*
 2. **A settled run's omp process survives until `dispose()`** — Task 3 arranged that
-   deliberately so Task 7 can resume a completed run. `omp_agent` must therefore dispose any
+   deliberately so Task 8 can resume a completed run. `omp_agent` must therefore dispose any
    handle it does **not** keep in the registry, or every dispatch leaks an omp process.
 3. **A cap breach is a result, not an exception.** A run that hits `max_turns` or `max_usd`
    returns its report and footer with `stopped_because` set. Only a failure to *start* is an
@@ -562,7 +562,71 @@ git commit -m "feat(agent): omp_agent dispatches a run and returns its report"
 
 ---
 
-### Task 5: Agent definitions — the drop-in core
+### Task 5: Stop stripping the subagent's own capabilities
+
+**Files:**
+- Modify: `src/runner.ts`
+- Test: `test/profile.test.ts`
+
+**The whole change.** `startRun` currently passes `--no-skills --no-rules
+--no-extensions` on every dispatch. That was the wiki project's cost-control
+posture — strip everything to reach a 10,322-token floor — carried into a general
+subagent tool where it does not belong.
+
+**A dispatched agent should use omp's own skills, rules, extensions and MCP
+servers.** omp already does that by default. We just have to stop preventing it.
+
+Do not build a capability-configuration subsystem. omp owns that; this tool's job
+is the dispatch interface, not re-managing omp's config.
+
+**Keep `--tools=`.** That is not isolation, it is the agent definition's `tools:`
+field being honoured, and it is real parity with native subagents.
+
+**Keep `CLAUDE_CONFIG_DIR` pointed at an empty directory.** omp reads external tool
+configs (`.claude/`, `.cursor/`) **profile-independently**, so without this a
+dispatched agent inherits the host's Claude MCP servers — which is the one thing it
+should not have, since those are the 43k-token surface we are not paying for.
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `test/profile.test.ts`. Test the argv construction directly.
+
+```ts
+test("skills, rules and extensions are NOT stripped", () => {
+  // assert --no-skills, --no-rules and --no-extensions are ABSENT
+});
+test("the tools allowlist is still passed", () => {});
+test("CLAUDE_CONFIG_DIR still points at an empty directory", () => {});
+test("--no-lsp and --no-pty are still passed", () => {
+  // these are runtime noise, not capabilities; they stay
+});
+```
+
+**Assert absence, not presence.** The default changed direction, so a test that only
+checks a flag appears when asked for would have passed under the old behaviour too.
+
+- [ ] **Step 2: Run — expect FAIL**
+
+- [ ] **Step 3: Extract `buildOmpArgs` from `startRun` in `src/runner.ts`**
+
+The argv is built inline. Pull it into an exported pure function, confirm the suite
+passes unchanged, **then** remove the three flags. Extracting before changing keeps
+the two risks apart.
+
+- [ ] **Step 4: Remove `--no-skills`, `--no-rules`, `--no-extensions`**
+
+- [ ] **Step 5: Run tests — expect PASS**
+
+- [ ] **Step 6: Run the whole suite, then commit**
+
+```bash
+git add src/runner.ts test/profile.test.ts
+git commit -m "fix(runner): let a dispatched agent use omp's own skills, rules and extensions"
+```
+
+---
+
+### Task 6: Agent definitions — the drop-in core
 
 **Files:** Create `src/agentdef.ts`; Test: `test/agentdef.test.ts`
 
@@ -592,7 +656,7 @@ export function discoverAgentDefs(cwd: string, home: string): Map<string, AgentD
 
 ---
 
-### Task 6: Wire agent definitions into `omp_agent`, and refuse on loss
+### Task 7: Wire agent definitions into `omp_agent`, and refuse on loss
 
 **Files:** Modify `src/mcp/server.ts`; Test: extend `test/omp-agent.test.ts`
 
@@ -603,7 +667,7 @@ export function discoverAgentDefs(cwd: string, home: string): Map<string, AgentD
 
 ---
 
-### Task 7: Conversation — the native-parity tools
+### Task 8: Conversation — the native-parity tools
 
 **Files:** Modify `src/mcp/server.ts`; Test: `test/conversation.test.ts`
 
@@ -614,7 +678,7 @@ export function discoverAgentDefs(cwd: string, home: string): Map<string, AgentD
 
 ---
 
-### Task 8: `ask_supervisor` and `omp_answer`
+### Task 9: `ask_supervisor` and `omp_answer`
 
 **Files:** Create `src/asktool.ts`; modify `src/runner.ts`, `src/mcp/server.ts`; Test: `test/ask.test.ts`
 
@@ -625,7 +689,7 @@ export function discoverAgentDefs(cwd: string, home: string): Map<string, AgentD
 
 ---
 
-### Task 9: Worktree isolation
+### Task 10: Worktree isolation
 
 **Files:** Create `src/worktree.ts`; modify `src/mcp/server.ts`; Test: `test/worktree.test.ts`
 
@@ -636,7 +700,7 @@ export function discoverAgentDefs(cwd: string, home: string): Map<string, AgentD
 
 ---
 
-### Task 10: Skill, shipped agents, README, and the paid smoke test
+### Task 11: Skill, shipped agents, README, and the paid smoke test
 
 **Files:** `skills/omp-subagents/SKILL.md`, `agents/{implementer,reviewer,explorer}.md`, `README.md`, `scripts/smoke.sh`
 
@@ -654,7 +718,7 @@ The README carries a CLAUDE.md snippet the user can paste to make omp subagents 
 
 ## Self-review notes
 
-**Spec coverage.** §3 packaging → Task 1. §4 tool surface → Task 4, Task 7, Task 8, plus `omp_models` in Task 2. §5 agent definitions and translation → Task 5, Task 6. §6 models, config, key trap → Task 2. §7 isolation → Task 9. §8 reuse → Task 3. §9 turning it on → Task 10. §10 gaps → Task 10's skill. §12.1 tiers → Task 2 defaults. §12.2 refuse → Task 6. §12.3 keep `taskfile.ts` → untouched throughout.
+**Spec coverage.** §3 packaging → Task 1. §4 tool surface → Task 4, Task 8, Task 9, plus `omp_models` in Task 2. §5 agent definitions and translation → Task 6, Task 7. §6 models, config, key trap → Task 2. §7 isolation → Task 10. §8 reuse → Task 3. §9 turning it on → Task 11. §10 gaps → Task 11's skill. §12.1 tiers → Task 2 defaults. §12.2 refuse → Task 7. §12.3 keep `taskfile.ts` → untouched throughout.
 
 **Type consistency.** `RunResult`, `StoppedBecause`, `CapState` and `Caps` are v1's and unchanged. `RunOptions`, `RunHandle`, `AgentDef` and `TierConfig` are defined once here and used with the same field names throughout.
 

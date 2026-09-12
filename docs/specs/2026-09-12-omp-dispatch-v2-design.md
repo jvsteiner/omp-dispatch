@@ -270,6 +270,33 @@ directory it is given, so this is a create, a path swap and a cleanup.
 Path locking survives as an optional `readonly` list for the ingest-shaped case
 that motivated v1. It is no longer the headline.
 
+## 7.1 A subagent uses omp's own capabilities
+
+An earlier draft of this spec passed `--no-skills --no-rules --no-extensions` on
+every dispatch and described a dispatched agent as having no skills or MCP
+servers at all. That was the wiki project's cost-control posture — strip
+everything to reach the 10,322-token floor — carried into a general subagent
+tool where it does not belong.
+
+**A dispatched agent uses omp's own skills, rules, extensions and MCP servers.**
+omp already does this by default; the fix is to stop preventing it. This tool's
+job is the dispatch interface, not re-managing omp's configuration — omp owns
+that, and a user who wants different capabilities for dispatched agents has
+omp's own mechanisms for it, including `--profile`.
+
+Two flags stay, for reasons that are not about capability:
+
+- **`--tools=`** is the agent definition's `tools:` field being honoured. That
+  is parity with native subagents, not isolation.
+- **`CLAUDE_CONFIG_DIR` pointed at an empty directory.** omp reads external tool
+  configs (`.claude/`, `.cursor/`) *profile-independently*, so without this a
+  dispatched agent inherits the **host's Claude** MCP servers — the one surface
+  it should not have, since not paying for it is the entire saving.
+
+Note that the §2 floor of 10,322 tokens was measured on a stripped agent. A
+dispatched agent with omp's own skills and servers loaded will not have that
+floor. That is the correct trade: capability the user chose, priced honestly.
+
 ## 8. What survives from v1
 
 Tasks 1 through 5 are built, reviewed and committed on
@@ -311,9 +338,15 @@ Two mechanisms, both shipped:
 
 Three things this cannot do, stated plainly so the skill can route around them.
 
-1. **No MCP servers, no skills, no Claude-native tools inside a dispatched
-   agent.** That absence *is* the 43,000-token saving. A task that needs them
-   must use a native subagent. This is the one real dividing line.
+1. **A dispatched agent does not get *Claude's* MCP servers, skills or native
+   tools — it gets *omp's own*.** See §7.1. The earlier draft of this spec said
+   a dispatched agent had none at all, and stripped them unconditionally with
+   `--no-skills --no-rules --no-extensions`. That was the wiki project's
+   cost-control posture carried into a general tool, and it was wrong.
+
+   The real dividing line is narrower: a task that specifically needs a **Claude
+   Code** MCP server or skill — one you have not also given omp — must use a
+   native subagent.
 2. ~~**No background dispatch with automatic notification.**~~ **Struck — this
    gap does not exist.** Verified against Claude Code's own docs: since v2.1.212
    the host **auto-backgrounds** a main-conversation MCP tool call still running

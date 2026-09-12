@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { readFileSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -32,6 +32,18 @@ async function runOmp(args: string[], extraEnv: Record<string, string> = {}): Pr
     );
   }
   return result.stdout.toString().trim();
+}
+
+function pluginVersion(): string {
+  try {
+    // The plugin manifest, not package.json: a marketplace install resolves
+    // the version from the manifest, so that is the one clients should be
+    // told about. package.json is kept in step by a packaging test.
+    const manifest = join(dirname(import.meta.path), "..", "..", ".claude-plugin", "plugin.json");
+    return JSON.parse(readFileSync(manifest, "utf8")).version ?? "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
 }
 
 const MODEL_DESCRIPTION =
@@ -78,7 +90,10 @@ export interface CreateServerOptions {
 }
 
 export function createServer(opts: CreateServerOptions = {}): McpServer {
-  const server = new McpServer({ name: "omp-dispatch", version: "0.1.0" });
+  // Read, not hardcoded: a literal here silently goes stale on every release,
+  // so the server would tell clients it is a version that is no longer what is
+  // installed. Caught when 0.1.1 introduced itself as 0.1.0.
+  const server = new McpServer({ name: "omp-dispatch", version: pluginVersion() });
 
   // Every dispatched run lives here, keyed by name, once it has settled — see
   // src/mcp/runs.ts. `reserved` closes the race a bare registry can't: two

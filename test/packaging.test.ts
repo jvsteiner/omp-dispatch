@@ -83,6 +83,15 @@ test("the README documents adding the marketplace before installing", () => {
   expect(addAt).toBeLessThan(installAt);   // order matters; install alone fails
 });
 
+test("package.json carries a version and matches the manifest", () => {
+  // It had none at all, so a version bump silently skipped it and the server
+  // fell back to 0.0.0. A missing field is easy to not notice.
+  const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  const plug = JSON.parse(readFileSync(join(root, ".claude-plugin/plugin.json"), "utf8"));
+  expect(pkg.version).toMatch(/^\d+\.\d+\.\d+$/);
+  expect(pkg.version).toBe(plug.version);
+});
+
 test("plugin and marketplace manifests agree on the version", () => {
   const p = JSON.parse(readFileSync(join(root, ".claude-plugin/plugin.json"), "utf8"));
   const m = JSON.parse(readFileSync(join(root, ".claude-plugin/marketplace.json"), "utf8"));
@@ -96,4 +105,20 @@ test("the licence is MIT and the file is present", () => {
   const p = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
   expect(p.license).toBe("MIT");
   expect(readFileSync(join(root, "LICENSE"), "utf8")).toContain("MIT License");
+});
+
+test("the MCP server reports the version the package actually is", async () => {
+  const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+  const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+  const { createServer } = await import("../src/mcp/server.ts");
+
+  const [a, b] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "t", version: "0" }, { capabilities: {} });
+  await Promise.all([createServer().connect(a), client.connect(b)]);
+
+  const declared = JSON.parse(
+    readFileSync(join(root, ".claude-plugin/plugin.json"), "utf8"),
+  ).version;
+  expect(client.getServerVersion()?.version).toBe(declared);
+  await client.close();
 });

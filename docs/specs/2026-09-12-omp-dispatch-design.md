@@ -1,6 +1,12 @@
 # omp-dispatch — design
 
 > Status: draft for review
+
+> **SUPERSEDED** by `2026-09-12-omp-dispatch-v2-design.md`. This version targeted
+> bulk document ingest. The real goal is replacing native Claude Code subagents,
+> which changes the packaging (MCP server, not shell scripts), the isolation
+> primitive (git worktree, not chmod) and the priority of agent definitions.
+> Tasks 1-5 built from this spec survive; see v2 section 8.
 > Date: 2026-09-12
 > Source: `~/Documents/omp-supervisor-brief.md`, plus `omp v18.1.17` docs read on disk
 

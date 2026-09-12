@@ -21,12 +21,12 @@ Branch `build/omp-dispatch-m1-m4`, HEAD `c28416c`, **66 tests passing**. v1 Task
 | `src/preflight.ts` | unchanged; `lockPaths`/`unlockPaths` become optional, provider guard central |
 | `src/taskfile.ts` | kept for the file-driven path (spec §12.3) |
 | `test/fake-omp.ts` | unchanged, still the offline test double |
-| `src/broker.ts` | **source material for `src/runner.ts`** — see N3 |
+| `src/broker.ts` | **source material for `src/runner.ts`** — see Task 3 |
 
 ## Global Constraints
 
 - bun ≥ 1.4.0, TypeScript, `bun:test` only. macOS and Linux.
-- **No test may call a model provider** except the smoke test in N10.
+- **No test may call a model provider** except the smoke test in Task 10.
 - Counts and cost come from `getSessionStats()`. Never count frames for a number.
 - A turn completes only on `agent_end` where `isTerminal !== false`.
 - **Caps are `>=` on every axis.** Permissive at a boundary is the one direction they must not fail.
@@ -39,7 +39,7 @@ Branch `build/omp-dispatch-m1-m4`, HEAD `c28416c`, **66 tests passing**. v1 Task
 
 ---
 
-### N1: Plugin skeleton and a working MCP server
+### Task 1: Plugin skeleton and a working MCP server
 
 Prove the wiring end-to-end with the cheapest possible tool before building anything hard.
 
@@ -187,7 +187,7 @@ git commit -m "feat(mcp): plugin manifest and a working MCP server with omp_ping
 
 ---
 
-### N2: Environment keys and model resolution
+### Task 2: Environment keys and model resolution
 
 **Files:**
 - Create: `src/env.ts`, `src/models.ts`
@@ -414,7 +414,7 @@ git commit -m "feat(models): tier config with user override, and source provider
 
 ---
 
-### N3: `runner.ts` — adapt the broker, drop the daemon
+### Task 3: `runner.ts` — adapt the broker, drop the daemon
 
 **Files:**
 - Create: `src/runner.ts` (adapted from `src/broker.ts`)
@@ -470,7 +470,7 @@ export async function startRun(opts: RunOptions, runDir: string, runId: string):
 
 ---
 
-### N4: `omp_agent`
+### Task 4: `omp_agent`
 
 **Files:** Modify `src/mcp/server.ts`; Test: `test/omp-agent.test.ts`
 
@@ -478,12 +478,12 @@ export async function startRun(opts: RunOptions, runDir: string, runId: string):
 
 - [ ] **Step 1:** failing tests — a dispatch against `test/fake-omp.ts` returns the fake's reply; a cap breach is reported in the footer, not thrown; two concurrent dispatches get distinct names; a duplicate explicit `name` is rejected naming the clash.
 - [ ] **Step 2:** run, expect FAIL
-- [ ] **Step 3:** implement — resolve model (N2), start run (N3), `await handle.settled`, keep the handle in `Map<name, RunHandle>` so N6 can reach it.
+- [ ] **Step 3:** implement — resolve model (Task 2), start run (Task 3), `await handle.settled`, keep the handle in `Map<name, RunHandle>` so Task 6 can reach it.
 - [ ] **Step 4:** run, PASS. **Step 5:** commit.
 
 ---
 
-### N5: Agent definitions — the drop-in core
+### Task 5: Agent definitions — the drop-in core
 
 **Files:** Create `src/agentdef.ts`; Test: `test/agentdef.test.ts`
 
@@ -513,7 +513,7 @@ export function discoverAgentDefs(cwd: string, home: string): Map<string, AgentD
 
 ---
 
-### N6: Wire agent definitions into `omp_agent`, and refuse on loss
+### Task 6: Wire agent definitions into `omp_agent`, and refuse on loss
 
 **Files:** Modify `src/mcp/server.ts`; Test: extend `test/omp-agent.test.ts`
 
@@ -524,7 +524,7 @@ export function discoverAgentDefs(cwd: string, home: string): Map<string, AgentD
 
 ---
 
-### N7: Conversation — the native-parity tools
+### Task 7: Conversation — the native-parity tools
 
 **Files:** Modify `src/mcp/server.ts`; Test: `test/conversation.test.ts`
 
@@ -535,7 +535,7 @@ export function discoverAgentDefs(cwd: string, home: string): Map<string, AgentD
 
 ---
 
-### N8: `ask_supervisor` and `omp_answer`
+### Task 8: `ask_supervisor` and `omp_answer`
 
 **Files:** Create `src/asktool.ts`; modify `src/runner.ts`, `src/mcp/server.ts`; Test: `test/ask.test.ts`
 
@@ -546,7 +546,7 @@ export function discoverAgentDefs(cwd: string, home: string): Map<string, AgentD
 
 ---
 
-### N9: Worktree isolation
+### Task 9: Worktree isolation
 
 **Files:** Create `src/worktree.ts`; modify `src/mcp/server.ts`; Test: `test/worktree.test.ts`
 
@@ -557,7 +557,7 @@ export function discoverAgentDefs(cwd: string, home: string): Map<string, AgentD
 
 ---
 
-### N10: Skill, shipped agents, README, and the paid smoke test
+### Task 10: Skill, shipped agents, README, and the paid smoke test
 
 **Files:** `skills/omp-subagents/SKILL.md`, `agents/{implementer,reviewer,explorer}.md`, `README.md`, `scripts/smoke.sh`
 
@@ -575,8 +575,8 @@ The README carries a CLAUDE.md snippet the user can paste to make omp subagents 
 
 ## Self-review notes
 
-**Spec coverage.** §3 packaging → N1. §4 tool surface → N4, N7, N8, plus `omp_models` in N2. §5 agent definitions and translation → N5, N6. §6 models, config, key trap → N2. §7 isolation → N9. §8 reuse → N3. §9 turning it on → N10. §10 gaps → N10's skill. §12.1 tiers → N2 defaults. §12.2 refuse → N6. §12.3 keep `taskfile.ts` → untouched throughout.
+**Spec coverage.** §3 packaging → Task 1. §4 tool surface → Task 4, Task 7, Task 8, plus `omp_models` in Task 2. §5 agent definitions and translation → Task 5, Task 6. §6 models, config, key trap → Task 2. §7 isolation → Task 9. §8 reuse → Task 3. §9 turning it on → Task 10. §10 gaps → Task 10's skill. §12.1 tiers → Task 2 defaults. §12.2 refuse → Task 6. §12.3 keep `taskfile.ts` → untouched throughout.
 
 **Type consistency.** `RunResult`, `StoppedBecause`, `CapState` and `Caps` are v1's and unchanged. `RunOptions`, `RunHandle`, `AgentDef` and `TierConfig` are defined once here and used with the same field names throughout.
 
-**The one real risk.** N3 is a port of code that took four review rounds to get right. The carry-over list in N3 is not advisory — each item is a defect that was found the hard way, and dropping one silently reintroduces it. The ledger at `.superpowers/sdd/2026-09-12-omp-dispatch/progress.md` has the full history if an implementer needs the reasoning.
+**The one real risk.** Task 3 is a port of code that took four review rounds to get right. The carry-over list in Task 3 is not advisory — each item is a defect that was found the hard way, and dropping one silently reintroduces it. The ledger at `.superpowers/sdd/2026-09-12-omp-dispatch/progress.md` has the full history if an implementer needs the reasoning.

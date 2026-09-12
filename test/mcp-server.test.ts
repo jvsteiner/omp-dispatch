@@ -1,5 +1,5 @@
 import { test, expect, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -66,5 +66,64 @@ test("omp_ping fails clearly when omp is not on PATH", async () => {
   } finally {
     process.env.PATH = originalPath;
     rmSync(binDir, { recursive: true, force: true });
+  }
+});
+
+function fakeOmpModelsBin(): string {
+  // A fake `omp` whose "models" output grows by one provider only when it
+  // sees FAKE_DEEPSEEK_API_KEY in its environment — a stand-in for the real
+  // omp binary listing more providers once a key is present.
+  const binDir = mkdtempSync(join(tmpdir(), "omp-dispatch-fakemodels-"));
+  const script = [
+    "#!/bin/sh",
+    'if [ -n "$FAKE_DEEPSEEK_API_KEY" ]; then',
+    '  echo "provider-a (2)"',
+    '  echo "provider-b (2)"',
+    '  echo "provider-c (1)"',
+    "else",
+    '  echo "provider-a (2)"',
+    '  echo "provider-b (2)"',
+    "fi",
+  ].join("\n");
+  const ompPath = join(binDir, "omp");
+  writeFileSync(ompPath, script);
+  chmodSync(ompPath, 0o755);
+  return binDir;
+}
+
+const providerCount = (text: string): number => text.split("\n").filter(Boolean).length;
+
+test("omp_models lists more providers once shell-rc keys are applied", async () => {
+  const client = await connect();
+
+  // This proves omp_models actually merges loadProviderKeys() into the
+  // child's environment: if that merge were dropped (or applied to the
+  // wrong process), both counts below would come back equal at 2, since the
+  // fake omp only adds provider-c when it sees the key.
+  const binDir = fakeOmpModelsBin();
+  const homeDir = mkdtempSync(join(tmpdir(), "omp-dispatch-fakehome-"));
+  const originalPath = process.env.PATH;
+  const originalHome = process.env.HOME;
+
+  try {
+    // Without keys: HOME has no rc file yet, so loadProviderKeys() finds nothing.
+    process.env.PATH = binDir;
+    process.env.HOME = homeDir;
+    const without: any = await client.callTool({ name: "omp_models", arguments: {} });
+    const withoutCount = providerCount(without.content[0].text);
+    expect(withoutCount).toBe(2);
+
+    // With keys: an rc file in HOME exports the key the fake omp checks for.
+    writeFileSync(join(homeDir, ".zshrc"), `export FAKE_DEEPSEEK_API_KEY="sk-fake-123"\n`);
+    const withKeys: any = await client.callTool({ name: "omp_models", arguments: {} });
+    const withCount = providerCount(withKeys.content[0].text);
+    expect(withCount).toBe(3);
+
+    expect(withCount).toBeGreaterThan(withoutCount);
+  } finally {
+    process.env.PATH = originalPath;
+    process.env.HOME = originalHome;
+    rmSync(binDir, { recursive: true, force: true });
+    rmSync(homeDir, { recursive: true, force: true });
   }
 });

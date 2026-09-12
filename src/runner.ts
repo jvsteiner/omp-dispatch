@@ -60,6 +60,31 @@ const MAX_STATS_FAILURES = 3;
 const TERMINATION_GRACE_MS = 2_000;
 
 /**
+ * The CLI flags passed to the dispatched omp agent, beyond provider/model
+ * (which RpcClient adds itself). Pure and exported so profile changes — what
+ * a dispatched agent is and isn't allowed to use — can be tested directly
+ * against the argv, without spawning anything.
+ */
+export function buildOmpArgs(
+  opts: Pick<RunOptions, "tools" | "systemPrompt" | "maxSeconds">,
+): string[] {
+  return [
+    `--tools=${opts.tools}`,
+    ...(opts.systemPrompt ? [`--append-system-prompt=${opts.systemPrompt}`] : []),
+    // --no-skills, --no-rules and --no-extensions are deliberately NOT here.
+    // omp already loads its own skills, rules, extensions and MCP servers by
+    // default; a dispatched agent should use them. --no-lsp and --no-pty stay
+    // — they're runtime noise, not capabilities.
+    "--no-lsp", "--no-pty",
+    // Always longer than our own wall clock below, so this runner always
+    // wins that race and reports max_seconds itself instead of the two
+    // racing non-deterministically over which one gets to explain why the
+    // run stopped.
+    `--max-time=${opts.maxSeconds + 60}`,
+  ];
+}
+
+/**
  * Start one omp run and hand back a handle to it.
  *
  * Unlike v1's broker this is NOT a daemon: the MCP server is the long-lived
@@ -254,16 +279,7 @@ export async function startRun(
     spawn: spawnAgent,
     provider, model: id,
     terminationGraceMs: TERMINATION_GRACE_MS,
-    args: [
-      `--tools=${opts.tools}`,
-      ...(opts.systemPrompt ? [`--append-system-prompt=${opts.systemPrompt}`] : []),
-      "--no-skills", "--no-rules", "--no-extensions", "--no-lsp", "--no-pty",
-      // Always longer than our own wall clock below, so this runner always
-      // wins that race and reports max_seconds itself instead of the two
-      // racing non-deterministically over which one gets to explain why the
-      // run stopped.
-      `--max-time=${opts.maxSeconds + 60}`,
-    ],
+    args: buildOmpArgs(opts),
   });
 
   let settled: (r: RunResult) => void;

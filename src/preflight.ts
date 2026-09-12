@@ -16,7 +16,18 @@ export function assertProviderHasModel(model: string, catalogue: string): void {
   for (const line of catalogue.split("\n")) {
     const header = /^([a-z0-9-]+) \(\d+\)$/.exec(line.trim());
     if (header && !line.startsWith(" ")) { current = header[1]!; continue; }
-    if (current === provider && line.includes(id)) return;
+    if (current !== provider) continue;
+
+    // Match the model id as the whole first cell, never as a substring
+    // anywhere in the row: borders, the column header, and other columns
+    // ("yes", "200K", ...) would otherwise false-match almost any row, and a
+    // short id would false-match a longer sibling that merely starts with it.
+    const trimmed = line.trim();
+    if (trimmed.startsWith("│")) {
+      if (trimmed.split("│")[1]?.trim() === id) return;
+    } else if (trimmed === id) {
+      return;                                  // fallback: a plain indented model line
+    }
   }
   throw new Error(
     `provider '${provider}' does not list model '${id}'.\n` +
@@ -26,16 +37,31 @@ export function assertProviderHasModel(model: string, catalogue: string): void {
 }
 
 export async function readModelCatalogue(): Promise<string> {
-  return (await Bun.$`omp models`.nothrow().text()) ?? "";
+  return await Bun.$`omp models`.nothrow().text();
 }
 
 function present(workdir: string, rel: string[]): string[] {
   return rel.map(r => join(workdir, r)).filter(p => existsSync(p));
 }
 
+/**
+ * Run `chmod -R <mode>` over the paths in `rel` that exist. A missing path is
+ * silently skipped (filtered by `present`), but a chmod that fails on a path
+ * that *does* exist is a real error (permission denied, read-only mount) and
+ * must not be swallowed — it surfaces naming the path that failed.
+ */
+async function chmodPresent(workdir: string, rel: string[], mode: string, verb: string): Promise<void> {
+  for (const p of present(workdir, rel)) {
+    const r = await Bun.$`chmod -R ${mode} ${p}`.nothrow().quiet();
+    if (r.exitCode !== 0) {
+      throw new Error(`failed to ${verb} '${p}': ${r.stderr.toString().trim()}`);
+    }
+  }
+}
+
 /** Make paths read-only at the OS level, before any model exists. */
 export async function lockPaths(workdir: string, rel: string[]): Promise<void> {
-  for (const p of present(workdir, rel)) await Bun.$`chmod -R a-w ${p}`.nothrow().quiet();
+  await chmodPresent(workdir, rel, "a-w", "lock");
 }
 
 /**
@@ -44,7 +70,7 @@ export async function lockPaths(workdir: string, rel: string[]): Promise<void> {
  * unwritable. Clearing it first stops a stuck state compounding.
  */
 export async function unlockPaths(workdir: string, rel: string[]): Promise<void> {
-  for (const p of present(workdir, rel)) await Bun.$`chmod -R u+w ${p}`.nothrow().quiet();
+  await chmodPresent(workdir, rel, "u+w", "unlock");
 }
 
 async function isRepo(workdir: string): Promise<boolean> {
@@ -53,7 +79,17 @@ async function isRepo(workdir: string): Promise<boolean> {
 }
 
 function parsePorcelain(text: string): string[] {
-  return text.split("\n").map(l => l.slice(3).trim()).filter(Boolean).sort();
+  return text
+    .split("\n")
+    .map(l => l.slice(3).trim())
+    .filter(Boolean)
+    .map(p => {
+      // A rename/copy line reads "old -> new"; report the destination, since
+      // that's the path that actually exists on disk.
+      const arrow = p.indexOf(" -> ");
+      return arrow < 0 ? p : p.slice(arrow + 4);
+    })
+    .sort();
 }
 
 /** Returns the dirty-file list, or null when workdir is not a git repo. */

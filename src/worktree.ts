@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 
 export interface Worktree {
   /** Absolute path the run should use as its workdir. */
@@ -36,8 +36,12 @@ export async function createWorktree(repoDir: string, runId: string): Promise<Wo
   // as an untracked directory in the parent's `git status`, which both dirties
   // the tree you are working in and corrupts this run's own files_changed —
   // the field the supervisor verifies runs by. A test caught exactly that.
-  const root = join(tmpdir(), "omp-dispatch-worktrees");
-  mkdirSync(root, { recursive: true });
+  // Each worktree gets its own uniquely-created parent directory. Keying the
+  // path on runId alone inside one shared root was a real defect, caught by a
+  // test: `git worktree add` refuses a path that already exists, so leftovers
+  // from a crashed run block every later run with the same id, and two repos
+  // dispatching the same id would collide outright.
+  const root = mkdtempSync(join(tmpdir(), "omp-dispatch-wt-"));
   const path = join(root, runId);
   const branch = `omp-dispatch/${runId}`;
   const add = await Bun.$`git worktree add -b ${branch} ${path} HEAD`
@@ -61,7 +65,9 @@ export async function createWorktree(repoDir: string, runId: string): Promise<Wo
 
       await Bun.$`git worktree remove --force ${path}`.cwd(repoDir).nothrow().quiet();
       await Bun.$`git branch -D ${branch}`.cwd(repoDir).nothrow().quiet();
-      return { removed: !existsSync(path), path };
+      const removed = !existsSync(path);
+      if (removed) rmSync(root, { recursive: true, force: true });
+      return { removed, path };
     },
   };
 }

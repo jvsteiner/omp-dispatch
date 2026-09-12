@@ -7,6 +7,7 @@ import { loadTierConfig, resolveModel } from "../models.ts";
 import { startRun } from "../runner.ts";
 import { newRunId, createRunDir } from "../rundir.ts";
 import { createRegistry, uniqueName, type RunRegistry } from "./runs.ts";
+import { discoverAgentDefs, type AgentDef } from "../agentdef.ts";
 
 /**
  * Shell out to `omp` and return its stdout, trimmed. Every tool that talks to
@@ -112,9 +113,11 @@ export function createServer(opts: CreateServerOptions = {}): McpServer {
       description: z.string().describe("A short (3-5 word) description of the task"),
       prompt: z.string().describe("The task for the agent to perform"),
       subagent_type: z.string().optional().describe(
-        "Native subagent type name, kept for parity with Agent. Agent-definition lookup " +
-          "(.claude/agents/*.md) is not wired up yet — every dispatch currently runs with " +
-          "the default tool set regardless of this value.",
+        "Name of an agent definition in .claude/agents/*.md — the same files native " +
+          "subagents use, read unmodified. Its tools, system prompt, maxTurns and model " +
+          "are applied. A definition requiring a tool omp has no equivalent for (Skill, " +
+          "ToolSearch, an mcp__* tool) is refused rather than run weakened. Omit to run " +
+          "with the defaults.",
       ),
       model: z.string().optional().describe(MODEL_DESCRIPTION),
       name: z.string().optional().describe(
@@ -131,8 +134,35 @@ export function createServer(opts: CreateServerOptions = {}): McpServer {
           "working directory.",
       ),
     },
-    async ({ description, prompt, model, name, workdir }, extra) => {
+    async ({ description, prompt, subagent_type, model, name, workdir }, extra) => {
       const targetWorkdir = workdir ?? process.cwd();
+
+      // Resolved BEFORE any run starts, so a refusal costs nothing.
+      let def: AgentDef | undefined;
+      if (subagent_type) {
+        const { defs } = discoverAgentDefs(targetWorkdir, process.env.HOME ?? "");
+        def = defs.get(subagent_type);
+        if (!def) {
+          const available = [...defs.keys()].sort();
+          throw new Error(
+            `omp_agent: no agent definition named '${subagent_type}' under ` +
+              `${targetWorkdir}/.claude/agents or ~/.claude/agents. ` +
+              (available.length
+                ? `Available: ${available.join(", ")}.`
+                : `No definitions were found in either location.`),
+          );
+        }
+        // An agent quietly missing the tool it was written around produces
+        // confident wrong work. Refuse, and name everything that is missing.
+        if (def.droppedTools.length > 0) {
+          throw new Error(
+            `omp_agent: agent '${subagent_type}' (${def.source}) requires ` +
+              `${def.droppedTools.length === 1 ? "a tool" : "tools"} omp has no equivalent ` +
+              `for: ${def.droppedTools.join(", ")}. Refusing rather than running a weakened ` +
+              `agent — use a native subagent for this one.`,
+          );
+        }
+      }
 
       let runName: string;
       if (name) {
@@ -157,7 +187,9 @@ export function createServer(opts: CreateServerOptions = {}): McpServer {
           join(home, ".omp-dispatch", "config.json"),
           join(targetWorkdir, ".omp-dispatch", "config.json"),
         ]);
-        const resolvedModel = resolveModel(model, cfg);
+        // Precedence, highest first: explicit argument, the definition's
+        // model:, then the configured default tier.
+        const resolvedModel = resolveModel(model ?? def?.model, cfg);
 
         const runId = newRunId();
         const runDir = createRunDir(targetWorkdir, runId);
@@ -170,8 +202,9 @@ export function createServer(opts: CreateServerOptions = {}): McpServer {
             prompt,
             model: resolvedModel,
             workdir: targetWorkdir,
-            tools: AGENT_DEFAULTS.tools,
-            maxTurns: AGENT_DEFAULTS.maxTurns,
+            tools: def ? def.ompTools.join(",") : AGENT_DEFAULTS.tools,
+            systemPrompt: def?.systemPrompt,
+            maxTurns: def?.maxTurns ?? AGENT_DEFAULTS.maxTurns,
             maxUsd: AGENT_DEFAULTS.maxUsd,
             maxSeconds: AGENT_DEFAULTS.maxSeconds,
             env: loadProviderKeys(),

@@ -387,3 +387,154 @@ test("uniqueName trims a trailing dash left by slicing, including on collision",
   const second = uniqueName(desc, n => taken.has(n));
   expect(second).toBe(`${"a".repeat(39)}-2`);
 });
+
+// --- Task 7: agent definitions applied, and refused rather than weakened ---
+
+import { mkdirSync } from "node:fs";
+
+/**
+ * A project tree with its own .claude/agents. Never the developer's real one:
+ * a test that depends on whose machine it runs on is not a test.
+ */
+function projectWithAgents(defs: Record<string, string>): string {
+  const workdir = mkdtempSync(join(tmpdir(), "omp-agent-defs-"));
+  const dir = join(workdir, ".claude", "agents");
+  mkdirSync(dir, { recursive: true });
+  for (const [file, body] of Object.entries(defs)) {
+    writeFileSync(join(dir, `${file}.md`), body);
+  }
+  return workdir;
+}
+
+const agentDef = (name: string, extra: string) =>
+  `---\nname: ${name}\ndescription: the ${name} agent\n${extra}---\nYou are ${name}. Be brief.\n`;
+
+async function dispatch(client: Client, args: Record<string, unknown>) {
+  return (await client.callTool({ name: "omp_agent", arguments: args })) as any;
+}
+
+test("subagent_type applies the definition's tools and system prompt", async () => {
+  const workdir = projectWithAgents({
+    scout: agentDef("scout", "tools: Read, Grep\nmaxTurns: 7\n"),
+  });
+  const dumpDir = mkdtempSync(join(tmpdir(), "omp-t7-dump-"));
+  const dump = join(dumpDir, "argv.json");
+  process.env.FAKE_OMP_DUMP = dump;
+  process.env.FAKE_OMP_SCRIPT = JSON.stringify({});
+  try {
+    const client = await connect();
+    await dispatch(client, { description: "scout it", prompt: "go", subagent_type: "scout", workdir });
+    const seen = JSON.parse(readFileSync(dump, "utf8"));
+    const argv: string[] = seen.argv;
+    expect(argv).toContain("--tools=read,grep");
+    const sysArg = argv.find(a => a.startsWith("--append-system-prompt"));
+    expect(sysArg).toBeDefined();
+  } finally {
+    delete process.env.FAKE_OMP_DUMP;
+  }
+}, 30_000);
+
+test("the definition's maxTurns is applied", async () => {
+  const workdir = projectWithAgents({
+    tight: agentDef("tight", "tools: Read\nmaxTurns: 1\n"),
+  });
+  process.env.FAKE_OMP_SCRIPT = JSON.stringify({ turnCostUsd: 0, toolCallsPerTurn: 1 });
+  const client = await connect();
+  const r = await dispatch(client, { description: "tight run", prompt: "go", subagent_type: "tight", workdir });
+  expect(r.content[0].text).toContain("max_turns");
+}, 30_000);
+
+// The footer's model= reports what the AGENT said about itself (RunResult.model),
+// which for the fake is always fake/fake-1. What model was REQUESTED is only
+// observable in the argv the child was launched with, so assert there.
+test("the definition's model is used when no explicit model is given", async () => {
+  const workdir = projectWithAgents({
+    picky: agentDef("picky", "tools: Read\nmodel: zai/glm-4.7\n"),
+  });
+  const dump = join(mkdtempSync(join(tmpdir(), "omp-t7-model-")), "argv.json");
+  process.env.FAKE_OMP_DUMP = dump;
+  process.env.FAKE_OMP_SCRIPT = JSON.stringify({});
+  try {
+    const client = await connect();
+    await dispatch(client, { description: "picky run", prompt: "go", subagent_type: "picky", workdir });
+    expect(JSON.stringify(JSON.parse(readFileSync(dump, "utf8")).argv)).toContain("glm-4.7");
+  } finally {
+    delete process.env.FAKE_OMP_DUMP;
+  }
+}, 30_000);
+
+test("an explicit model argument beats the definition's", async () => {
+  const workdir = projectWithAgents({
+    picky: agentDef("picky", "tools: Read\nmodel: zai/glm-4.7\n"),
+  });
+  process.env.FAKE_OMP_SCRIPT = JSON.stringify({});
+  const client = await connect();
+  const dump = join(mkdtempSync(join(tmpdir(), "omp-t7-override-")), "argv.json");
+  process.env.FAKE_OMP_DUMP = dump;
+  try {
+    await dispatch(client, {
+      description: "override run", prompt: "go", subagent_type: "picky",
+      model: "deepseek/deepseek-v4-pro", workdir,
+    });
+    const argv = JSON.stringify(JSON.parse(readFileSync(dump, "utf8")).argv);
+    expect(argv).toContain("deepseek-v4-pro");
+    expect(argv).not.toContain("glm-4.7");
+  } finally {
+    delete process.env.FAKE_OMP_DUMP;
+  }
+}, 30_000);
+
+test("a definition requiring Skill is refused, and the message names Skill", async () => {
+  const workdir = projectWithAgents({
+    skilled: agentDef("skilled", "tools: Read, Skill\n"),
+  });
+  const client = await connect();
+  const r = await dispatch(client, { description: "skilled run", prompt: "go", subagent_type: "skilled", workdir });
+  expect(r.isError).toBe(true);
+  expect(JSON.stringify(r.content)).toContain("Skill");
+}, 30_000);
+
+test("the refusal names every dropped tool, not just the first", async () => {
+  const workdir = projectWithAgents({
+    many: agentDef("many", "tools: Read, Skill, ToolSearch, mcp__foo__bar\n"),
+  });
+  const client = await connect();
+  const r = await dispatch(client, { description: "many run", prompt: "go", subagent_type: "many", workdir });
+  const text = JSON.stringify(r.content);
+  expect(text).toContain("Skill");
+  expect(text).toContain("ToolSearch");
+  expect(text).toContain("mcp__foo__bar");
+}, 30_000);
+
+test("an unknown subagent_type errors listing the available names", async () => {
+  const workdir = projectWithAgents({
+    scout: agentDef("scout", "tools: Read\n"),
+    tight: agentDef("tight", "tools: Read\n"),
+  });
+  const client = await connect();
+  const r = await dispatch(client, { description: "typo run", prompt: "go", subagent_type: "scowt", workdir });
+  expect(r.isError).toBe(true);
+  const text = JSON.stringify(r.content);
+  expect(text).toContain("scowt");
+  expect(text).toContain("scout");
+  expect(text).toContain("tight");
+}, 30_000);
+
+test("a discovery error in one file does not prevent using a valid definition", async () => {
+  const workdir = projectWithAgents({
+    good: agentDef("good", "tools: Read\n"),
+    broken: "this file has no front matter",
+  });
+  process.env.FAKE_OMP_SCRIPT = JSON.stringify({});
+  const client = await connect();
+  const r = await dispatch(client, { description: "good run", prompt: "go", subagent_type: "good", workdir });
+  expect(r.isError).toBeFalsy();
+}, 30_000);
+
+test("no subagent_type still works, using the defaults", async () => {
+  process.env.FAKE_OMP_SCRIPT = JSON.stringify({ replies: ["defaulted"] });
+  const client = await connect();
+  const r = await dispatch(client, { description: "plain run", prompt: "go" });
+  expect(r.isError).toBeFalsy();
+  expect(r.content[0].text).toContain("defaulted");
+}, 30_000);

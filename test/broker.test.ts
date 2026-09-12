@@ -1,6 +1,6 @@
 import { test, expect } from "bun:test";
 import {
-  mkdtempSync, mkdirSync, writeFileSync, readFileSync, statSync, existsSync, rmSync,
+  mkdtempSync, mkdirSync, writeFileSync, readFileSync, statSync, existsSync, rmSync, chmodSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -86,12 +86,18 @@ test("every frame is written to events.jsonl", async () => {
 
 // I6: regression coverage for the turn-double-count bug found in the first
 // pass. finish() calls client.abort() on a cap breach, and both the fake and
-// real omp answer abort with their own unsolicited agent_end — that frame
-// must not be re-counted as a turn. This is guarded two ways now (the
-// listener is unsubscribed before abort() is even called, and the handler
-// itself no-ops once a settle is under way); this test protects the
-// observable invariant — the turn count — rather than pinning down which one
-// of those provides it, so it still fails if a future cleanup removes both.
+// real omp answer abort with their own unsolicited agent_end. The event
+// listener is deliberately still attached when that frame arrives (it's only
+// unsubscribed in finish()'s finally block, once teardown is complete) so
+// that frame IS delivered to the handler — the `if (finishing) return` guard
+// right after the frame is logged is what stops it from being re-counted as
+// a turn. Fix round 2 found that an earlier version of this test passed even
+// with that guard deleted, because unsubscribing immediately (rather than at
+// the end) closed the hole by a different route, making the guard
+// unreachable and this test vacuous. Verified for real this time: removing
+// the `if (finishing) return` guard at the top of the onSessionEvent handler
+// in src/broker.ts makes this test fail with `turns: 2`, every time; putting
+// it back makes it pass again. See the fix report for the exact commands run.
 test("an abort's own echoed agent_end does not double-count a turn", async () => {
   const s = setup({ turnCostUsd: 5.0 }, { maxUsd: 1.0 });
   const r = await runBroker(s);
@@ -134,15 +140,30 @@ test("locked paths are restored after a start-up error", async () => {
 
 // I8: a turn that never emits a terminal agent_end must still be capped.
 // turnDelayMs keeps the fake mid-turn (cost already booked, no agent_end
-// yet) long enough for a short-interval poll to observe the breach on its
-// own, independent of the per-turn check.
+// yet) for 1000ms — long enough for a 50ms-interval poll to observe the
+// breach on its own, independent of the per-turn check.
+//
+// Fix round 2 found the first version of this test vacuous: with the poll
+// body disabled, the per-turn check (which only fires once turnDelayMs
+// elapses, at 1000ms) reaches the same capped/max_usd verdict, just later —
+// so state/stopped_because alone can't tell which path caught it. This
+// version asserts two things only the poll can produce: the run finishes
+// well under turnDelayMs, and progress.log has the poll's own log line.
+// Verified: commenting out the poll's setInterval body makes this test fail
+// (both the elapsed-time assertion and the log-line assertion) while the
+// other 13 tests still pass; restoring it passes again. See the fix report.
 test("a periodic poll catches a budget breach mid-turn, before any agent_end", async () => {
   process.env.OMP_DISPATCH_POLL_MS = "50";
   try {
     const s = setup({ turnCostUsd: 5.0, turnDelayMs: 1000 }, { maxUsd: 1.0, maxSeconds: 300 });
+    const t0 = Date.now();
     const r = await runBroker(s);
+    const elapsedMs = Date.now() - t0;
     expect(r.state).toBe("capped");
     expect(r.stopped_because).toBe("max_usd");
+    expect(elapsedMs).toBeLessThan(500);       // only reachable before the turn's own 1000ms delay elapses
+    const log = readFileSync(join(s.runDir, "progress.log"), "utf8");
+    expect(log).toContain("POLL breach detected mid-turn");
   } finally {
     delete process.env.OMP_DISPATCH_POLL_MS;
   }
@@ -221,4 +242,137 @@ test("finish still settles and writes a result even if git status fails", async 
 
   expect(r.state).toBe("completed");
   expect(r.files_changed).toEqual([]);
+}, 30_000);
+
+// --- Fix round 2 additions -------------------------------------------------
+
+// NEW Critical: costPoll used to be assigned only after `await client.start()`.
+// A signal (or the wall clock) firing while start() is still pending runs
+// finish(), which calls clearInterval(costPoll) while it's still undefined —
+// a no-op. start() then resolves (readyDelayMs makes that resolution land
+// after finish() has already completed) and unconditionally creates a
+// pollIntervalMs-period interval that nothing will ever clear again, since
+// finish() already ran and won't run a second time.
+//
+// runBroker()'s own promise resolves fine either way — finish() settles
+// `done` independent of whatever the leaked interval does afterward, so
+// asserting on the returned RunResult alone is vacuous here (this is exactly
+// how my first attempt at this test passed without actually exercising the
+// bug). The real, reported symptom is a process that never exits on its own.
+// That needs a real separate process to observe: this spawns one that runs
+// the whole scenario and deliberately never calls process.exit(), then
+// checks whether it exits by itself.
+//
+// Verified: with pollIntervalMs forced tiny (50ms, via OMP_DISPATCH_POLL_MS)
+// and the `if (!finishing)` guard around the post-start() block reverted (so
+// costPoll is always assigned), the spawned process printed
+// RUNBROKER_RESOLVED but then hung past the 4s budget — killed, `hung: true`.
+// With the guard restored, it exits on its own in well under a second.
+test("a signal during client startup does not leave the process hanging on a leaked poll", async () => {
+  const scriptDir = mkdtempSync(join(tmpdir(), "omp-repro-"));
+  const scriptPath = join(scriptDir, "repro.ts");
+  const brokerPath = new URL("../src/broker.ts", import.meta.url).pathname;
+  const rundirPath = new URL("../src/rundir.ts", import.meta.url).pathname;
+  const fakePath = join(import.meta.dir, "fake-omp.ts");
+  writeFileSync(scriptPath, `
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { runBroker } from ${JSON.stringify(brokerPath)};
+import { newRunId, createRunDir } from ${JSON.stringify(rundirPath)};
+
+const workdir = mkdtempSync(join(tmpdir(), "omp-broker-"));
+const runId = newRunId();
+const runDir = createRunDir(workdir, runId);
+process.env.FAKE_OMP_SCRIPT = JSON.stringify({ readyDelayMs: 500 });
+const task = {
+  model: "fake/fake-1", workdir, readonly: [], tools: "read",
+  maxTurns: 120, maxUsd: 1.0, maxSeconds: 300, body: "do it",
+};
+const before = new Set(process.listeners("SIGINT"));
+const p = runBroker({ task, runDir, runId, command: ["bun", ${JSON.stringify(fakePath)}] });
+let added = [];
+while (added.length === 0) {
+  added = process.listeners("SIGINT").filter(l => !before.has(l));
+  await new Promise(r => setTimeout(r, 1));
+}
+added[0]("SIGINT");
+await p;
+console.log("RUNBROKER_RESOLVED");
+// Deliberately no process.exit(): a leaked, uncleared setInterval is exactly
+// what would keep this process running past this point on its own.
+`);
+
+  const proc = Bun.spawn(["bun", scriptPath], {
+    stdout: "pipe", stderr: "pipe",
+    env: { ...process.env, OMP_DISPATCH_POLL_MS: "50" },
+  });
+  const outcome = await Promise.race([
+    proc.exited.then(code => ({ hung: false as const, code })),
+    Bun.sleep(4000).then(() => ({ hung: true as const })),
+  ]);
+  if (outcome.hung) proc.kill();
+  const stdout = await new Response(proc.stdout).text().catch(() => "");
+
+  expect(stdout).toContain("RUNBROKER_RESOLVED");   // runBroker itself did settle
+  expect(outcome.hung).toBe(false);                 // and the process must exit on its own
+}, 10_000);
+
+// NEW Important: rpc-client.ts calls the onSessionEvent listener bare, with
+// nothing to catch a throw inside it. toolCallsPerTurn:0 plus turnDelayMs
+// gives a clean gap between events.jsonl's creation (on agent_start) and its
+// next write (on the delayed agent_end) to chmod it read-only in between,
+// forcing a real EACCES the same way test/preflight.test.ts does for chmod.
+//
+// Verified: removing the handler's own try/catch makes the appendFileSync
+// throw propagate uncaught through rpc-client.ts's #handleLine (bun test
+// reports it as a synchronous EACCES thrown from inside the RPC client,
+// not a graceful failure) instead of routing to finish() — meaning in a
+// real (non-test) run, nothing would catch it, finish() would never run,
+// and `raw` would stay locked with no result written. With the try/catch
+// restored, this test passes cleanly in well under a second.
+test("a handler exception (e.g. events.jsonl becoming unwritable) still reaches teardown", async () => {
+  const s = setup({ toolCallsPerTurn: 0, turnDelayMs: 300 }, { readonly: ["raw"] });
+  mkdirSync(join(s.task.workdir, "raw"));
+  writeFileSync(join(s.task.workdir, "raw", "a.txt"), "a");
+
+  const p = runBroker(s);
+  await waitForProgress(s.runDir, "START");
+  const eventsPath = join(s.runDir, "events.jsonl");
+  const deadline = Date.now() + 5000;
+  while (!existsSync(eventsPath)) {
+    if (Date.now() > deadline) throw new Error("timed out waiting for events.jsonl to be created");
+    await new Promise(r => setTimeout(r, 5));
+  }
+  chmodSync(eventsPath, 0o444);
+  const r = await p;
+
+  expect(r.state).toBe("error");
+  expect(statSync(join(s.task.workdir, "raw", "a.txt")).mode & 0o200).not.toBe(0);
+}, 30_000);
+
+// C1 (completed): the unlockPaths-throws branch IS testable, reproduced the
+// same way test/preflight.test.ts:90-97 has done since Task 2 —
+// chmodSync(sub, 0o000) on a subdirectory that already exists (so it's
+// included in the run's own initial recursive lock) makes the later
+// `chmod -R u+w raw` fail trying to recurse into it, with no root needed.
+test("finish still settles as an error when unlockPaths itself fails (a real chmod failure, no root)", async () => {
+  const s = setup({ turnDelayMs: 300 }, { readonly: ["raw"] });
+  mkdirSync(join(s.task.workdir, "raw"));
+  writeFileSync(join(s.task.workdir, "raw", "a.txt"), "a");
+  const sub = join(s.task.workdir, "raw", "sub");
+  mkdirSync(sub);
+  writeFileSync(join(sub, "f.txt"), "x");
+
+  const p = runBroker(s);
+  await waitForProgress(s.runDir, "START");
+  chmodSync(sub, 0o000);   // owner can still set this; no root needed
+  const r = await p;
+
+  expect(r.state).toBe("error");
+  expect(r.stopped_because).toBe("error");
+  const log = readFileSync(join(s.runDir, "progress.log"), "utf8");
+  expect(log).toContain("failed to unlock paths");
+
+  chmodSync(sub, 0o700);   // restore so the tmp dir can be cleaned up normally
 }, 30_000);

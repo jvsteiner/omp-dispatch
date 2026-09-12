@@ -1,6 +1,6 @@
 import { writeFileSync, appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { RpcClient } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
+import { RpcClient, type RpcAgentProcess } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
 import type { TaskSpec } from "./taskfile.ts";
 import {
   type RunResult, emptyResult, writeResult, appendProgress,
@@ -23,15 +23,10 @@ const OMP_CLI =
 // A stats call that fails this many times in a row means something is
 // genuinely wrong (not a one-off blip) — see the "budget cap silently
 // disappears" finding. Small on purpose: 3 gives one or two turns' worth of
-// grace before giving up.
+// grace before giving up. Shared by the per-turn check and the poll, so a
+// child that starts failing mid-turn can't quietly bypass the cap either
+// way it's noticed.
 const MAX_STATS_FAILURES = 3;
-
-/** True when the RPC client threw because it has no live child at all — not a
- * transient error, but proof the omp process is gone. rpc-client.ts's #send
- * throws this exact message synchronously whenever `#process` is null. */
-function isClientDead(e: unknown): boolean {
-  return e instanceof Error && e.message === "Client not started";
-}
 
 export async function runBroker(opts: BrokerOptions): Promise<RunResult> {
   const { task, runDir, runId } = opts;
@@ -57,8 +52,15 @@ export async function runBroker(opts: BrokerOptions): Promise<RunResult> {
   const emptyConfig = join(runDir, "no-claude-config");
   mkdirSync(emptyConfig, { recursive: true });
 
-  // Repair a stale lock from a previous kill -9, then lock for this run.
-  await unlockPaths(task.workdir, task.readonly);
+  // Repair a stale lock from a previous kill -9. Best-effort: if the tree is
+  // broken badly enough that even the repair-unlock can't walk it, log it
+  // and still try lockPaths below — its own guard (see I5) is what actually
+  // decides whether this run can proceed.
+  try {
+    await unlockPaths(task.workdir, task.readonly);
+  } catch (e) {
+    appendProgress(runDir, `ERROR failed to repair a stale lock: ${String(e)}`);
+  }
   const before = await gitSnapshot(task.workdir);
 
   // lockPaths is inside its own guard: a chmod failure partway through a
@@ -83,11 +85,54 @@ export async function runBroker(opts: BrokerOptions): Promise<RunResult> {
     ? task.model.split("/") as [string, string]
     : [undefined, task.model];
 
+  // A custom spawn instead of RpcClientOptions' command/cliPath so this can
+  // hold on to the child's own `exited` promise — RpcClient's `#process` is
+  // a private field with no public getter, but `exited` on the object this
+  // returns is the same hook a caller-owned process would have.
+  let childExited: Promise<number> | undefined;
+  const spawnAgent = (agentArgs: string[]): RpcAgentProcess => {
+    const argv = [...(opts.command ?? ["bun", opts.cliPath ?? OMP_CLI]), ...agentArgs];
+    const proc = Bun.spawn(argv, {
+      cwd: task.workdir,
+      env: { ...process.env, CLAUDE_CONFIG_DIR: emptyConfig } as Record<string, string>,
+      stdin: "pipe", stdout: "pipe", stderr: "pipe",
+    });
+    childExited = proc.exited;
+
+    let stderrTail = "";
+    void (async () => {
+      const reader = proc.stderr.getReader();
+      const decoder = new TextDecoder();
+      try {
+        for (;;) {
+          const { value, done: streamDone } = await reader.read();
+          if (streamDone) break;
+          stderrTail = (stderrTail + decoder.decode(value, { stream: true })).slice(-32768);
+        }
+      } catch { /* the pipe just closes when the child exits */ }
+    })();
+
+    return {
+      stdin: proc.stdin,
+      stdout: proc.stdout,
+      peekStderr: () => stderrTail,
+      kill: (signal, graceMs) => {
+        try { proc.kill((signal as number | NodeJS.Signals | undefined) ?? "SIGTERM"); } catch { /* already dead */ }
+        if (graceMs !== undefined && graceMs >= 0) {
+          const escalate = setTimeout(() => {
+            if (proc.exitCode === null) {
+              try { proc.kill("SIGKILL"); } catch { /* already dead */ }
+            }
+          }, graceMs);
+          escalate.unref?.();
+        }
+      },
+      exited: proc.exited,
+    };
+  };
+
   const client = new RpcClient({
-    cliPath: opts.cliPath ?? OMP_CLI,
-    command: opts.command,
-    cwd: task.workdir,
-    env: { ...process.env, CLAUDE_CONFIG_DIR: emptyConfig } as Record<string, string>,
+    spawn: spawnAgent,
     provider, model: id,
     args: [
       `--tools=${task.tools}`,
@@ -117,11 +162,14 @@ export async function runBroker(opts: BrokerOptions): Promise<RunResult> {
   const finish = async (stopped: NonNullable<RunResult["stopped_because"]>) => {
     if (finishing) return;
     finishing = true;
-    // Nothing below may call finish() again or keep the process alive on its
-    // own: stop listening/polling/signalling before doing anything else, so
-    // an in-flight competing trigger (the poll, a signal, the wall clock)
-    // can't race this settle.
-    unsubscribeEvents?.();
+    // The wall clock, poll and signal handlers are stopped immediately —
+    // nothing depends on them firing again. The session-event listener is
+    // deliberately NOT unsubscribed yet (see the finally block): client
+    // .abort() below makes the fake (and real omp) emit its own unsolicited
+    // agent_end, and the handler's own `if (finishing) return` guard —
+    // checked against the flag just set above — is what stops that frame
+    // from being double-counted as a turn. Unsubscribing here instead would
+    // make that guard unreachable and this exact regression untestable.
     clearTimeout(wallClock);
     clearInterval(costPoll);
     process.off("SIGINT", onSignal);
@@ -172,7 +220,9 @@ export async function runBroker(opts: BrokerOptions): Promise<RunResult> {
       // settled(result) and a best-effort write/log must happen regardless of
       // what threw above — an unhandled throw here would leave `done` (and
       // runBroker's caller) hanging forever with result.json stuck at
-      // state:"running".
+      // state:"running". Unsubscribe happens here, once, guaranteed — see
+      // the comment above for why it isn't earlier.
+      unsubscribeEvents?.();
       try { writeResult(runDir, result); } catch { /* best effort */ }
       try {
         appendProgress(runDir, `END ${result.stopped_because} — $${result.cost_usd.toFixed(4)}, ${result.turns} turns`);
@@ -189,7 +239,9 @@ export async function runBroker(opts: BrokerOptions): Promise<RunResult> {
   // to act on breach() with a number that never moved. A consecutive-failure
   // count on top of that stops the run outright after a handful of misses,
   // rather than silently running on forever against a stale cost — which is
-  // exactly how the budget cap would quietly stop enforcing itself.
+  // exactly how the budget cap would quietly stop enforcing itself. Shared
+  // by the per-turn handler and the poll below, so a stats failure is caught
+  // no matter which one happens to notice it first.
   async function refreshStats(): Promise<boolean> {
     try {
       const s = await client.getSessionStats();
@@ -199,11 +251,6 @@ export async function runBroker(opts: BrokerOptions): Promise<RunResult> {
       statsFailures = 0;
       return true;
     } catch (e) {
-      if (isClientDead(e)) {
-        appendProgress(runDir, `ERROR the omp process is no longer running: ${String(e)}`);
-        await finish("error");
-        return false;
-      }
       statsFailures++;
       appendProgress(
         runDir,
@@ -218,32 +265,44 @@ export async function runBroker(opts: BrokerOptions): Promise<RunResult> {
   }
 
   unsubscribeEvents = client.onSessionEvent(async (event: any) => {
-    appendFileSync(join(runDir, "events.jsonl"), `${JSON.stringify(event)}\n`);
-    // Once a settle is under way the listener is about to be (or already is
-    // being) removed above; this covers the narrow window where THIS
-    // invocation was already running before that happened. No more
-    // progress-log lines or turn accounting once we're ending — otherwise a
-    // stray frame from the abort we just issued could log a tool_start (or
-    // double-count a turn) after the END line has already been written.
-    if (finishing) return;
+    // rpc-client.ts calls this listener bare (no try/catch of its own), so
+    // an uncaught throw anywhere below — even a plain fs error appending to
+    // events.jsonl — would become an unhandled rejection: finish() would
+    // never run, and the run would drift to the wall clock with the
+    // workspace still locked. Route any such throw to the same teardown.
+    try {
+      appendFileSync(join(runDir, "events.jsonl"), `${JSON.stringify(event)}\n`);
+      // Once a settle is under way, no more progress-log lines or turn
+      // accounting — a stray frame from the abort finish() just issued
+      // (still logged above, for the audit trail) must not log a tool_start
+      // or double-count a turn after the END line has already been written.
+      // This is deliberately checked here, before unsubscribing (which
+      // happens later, in finish()'s finally) — see the comment there.
+      if (finishing) return;
 
-    const ev = event.assistantMessageEvent;
-    if (ev?.type === "tool_start") {
-      appendProgress(runDir, `${ev.name} ${String(JSON.stringify(ev.input ?? "")).slice(0, 70)}`);
+      const ev = event.assistantMessageEvent;
+      if (ev?.type === "tool_start") {
+        appendProgress(runDir, `${ev.name} ${String(JSON.stringify(ev.input ?? "")).slice(0, 70)}`);
+      }
+
+      if (event.type !== "agent_end") return;
+      if (!countTurn(state, event)) return;    // isTerminal:false is not a turn
+
+      const ok = await refreshStats();
+      if (finishing) return;                   // refreshStats() may have already ended the run
+      result.turns = state.turns;
+      writeResult(runDir, result);
+      appendProgress(runDir, `turn ${state.turns} — $${state.costUsd.toFixed(4)}`);
+      if (!ok) return;
+
+      const b = breach(state, caps);
+      await finish(b ?? "completed");
+    } catch (e) {
+      if (!finishing) {
+        appendProgress(runDir, `ERROR the session-event handler threw: ${String(e)}`);
+        await finish("error").catch(() => {});
+      }
     }
-
-    if (event.type !== "agent_end") return;
-    if (!countTurn(state, event)) return;    // isTerminal:false is not a turn
-
-    const ok = await refreshStats();
-    if (finishing) return;                   // refreshStats() may have already ended the run
-    result.turns = state.turns;
-    writeResult(runDir, result);
-    appendProgress(runDir, `turn ${state.turns} — $${state.costUsd.toFixed(4)}`);
-    if (!ok) return;
-
-    const b = breach(state, caps);
-    await finish(b ?? "completed");
   });
 
   wallClock = setTimeout(() => void finish("max_seconds"), task.maxSeconds * 1000);
@@ -251,49 +310,61 @@ export async function runBroker(opts: BrokerOptions): Promise<RunResult> {
   try {
     await client.start();
 
-    // Catches what the turn-based check above cannot: a turn that never
-    // emits a terminal agent_end (looping on tool calls, or just slow) would
-    // otherwise escape both the turn cap and the budget cap entirely. This
-    // poll is deliberately read-only against `state`/`result` — it takes its
-    // own snapshot instead of mutating the shared cap state that the turn
-    // handler owns, so it cannot race that handler the way an earlier draft
-    // of this file raced itself over turn counts. finish() re-reads stats
-    // itself, so the final numbers are correct regardless of which path
-    // triggered it.
-    costPoll = setInterval(() => {
-      if (finishing) return;
-      void (async () => {
-        let stats: Awaited<ReturnType<typeof client.getSessionStats>>;
-        try {
-          stats = await client.getSessionStats();
-        } catch (e) {
-          if (isClientDead(e)) {
-            appendProgress(runDir, `ERROR the omp process is no longer running: ${String(e)}`);
-            await finish("error");
-          } else {
-            appendProgress(runDir, `ERROR periodic get_session_stats failed: ${String(e)}`);
-          }
-          return;
-        }
-        if (finishing) return;               // a settle may have started while this was in flight
-        const probe = { ...state, costUsd: stats.cost };
-        const b = breach(probe, caps);
-        if (b) {
-          appendProgress(runDir, `POLL breach detected mid-turn: ${b} ($${stats.cost.toFixed(4)})`);
-          await finish(b);
-        }
-      })();
-    }, pollIntervalMs);
+    // A signal or the wall clock can fire while start() above is still
+    // pending — finish() already ran its cleanup by the time start()
+    // settles, finding costPoll (and everything below) not created yet.
+    // Nothing past this point may still run in that case: creating the poll
+    // anyway would leak an interval nothing will ever clear, calling
+    // getState()/prompt() would restart work on a client finish() is
+    // already tearing down.
+    if (!finishing) {
+      // The real hook for "did the child die unexpectedly": spawnAgent
+      // above captured the same `exited` promise a caller-owned process
+      // would have. finish() itself kills the child as part of normal
+      // teardown, but by then `finishing` is already true, so this is a
+      // no-op on the expected path.
+      if (childExited) {
+        void childExited.then(code => {
+          if (finishing) return;
+          appendProgress(runDir, `ERROR the omp process exited unexpectedly (code ${code})`);
+          void finish("error");
+        });
+      }
 
-    const st = await client.getState();
-    result.model = st.model ? { provider: st.model.provider, id: st.model.id } : null;
-    result.session_file = st.sessionFile ?? null;
-    writeResult(runDir, result);
-    appendProgress(runDir, `START ${task.model}`);
-    await client.prompt(task.body);
+      // Catches what the turn-based check above cannot: a turn that never
+      // emits a terminal agent_end (looping on tool calls, or just slow)
+      // would otherwise escape both the turn cap and the budget cap
+      // entirely. Shares refreshStats() (and its failure counter) with the
+      // per-turn handler rather than reading stats independently, so a
+      // child that starts failing mid-turn is caught the same way either
+      // path notices it, and shares `state` rather than a separate copy —
+      // both are only ever mutated after a `finishing` check, the same
+      // protection the per-turn handler relies on.
+      costPoll = setInterval(() => {
+        if (finishing) return;
+        void (async () => {
+          const ok = await refreshStats();
+          if (finishing || !ok) return;
+          const b = breach(state, caps);
+          if (b) {
+            appendProgress(runDir, `POLL breach detected mid-turn: ${b} ($${state.costUsd.toFixed(4)})`);
+            await finish(b);
+          }
+        })();
+      }, pollIntervalMs);
+
+      const st = await client.getState();
+      result.model = st.model ? { provider: st.model.provider, id: st.model.id } : null;
+      result.session_file = st.sessionFile ?? null;
+      writeResult(runDir, result);
+      appendProgress(runDir, `START ${task.model}`);
+      await client.prompt(task.body);
+    }
   } catch (e) {
-    appendProgress(runDir, `ERROR ${String(e)}`);
-    await finish("error");
+    if (!finishing) {
+      appendProgress(runDir, `ERROR ${String(e)}`);
+      await finish("error");
+    }
   }
 
   return done;

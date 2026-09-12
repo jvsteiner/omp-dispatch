@@ -6,7 +6,7 @@
  * FAKE_OMP_SCRIPT is JSON:
  *   { turnCostUsd, toolCallsPerTurn, replies: string[],
  *     nonTerminalFirst: boolean, askOnTurn: number | null,
- *     turnDelayMs: number, crashAfterPrompt: boolean }
+ *     turnDelayMs: number, crashAfterPrompt: boolean, readyDelayMs: number }
  */
 export {}; // top-level for-await below needs this file to be a module
 
@@ -23,6 +23,9 @@ const turnDelayMs: number = script.turnDelayMs ?? 0;
 // Simulates omp dying mid-turn (e.g. an OOM kill): the prompt is acked, then
 // the process exits before ever reporting agent_end.
 const crashAfterPrompt: boolean = script.crashAfterPrompt ?? false;
+// Delays the initial ready frame, so a test can act (e.g. send a signal)
+// while a host's client.start() is still genuinely pending.
+const readyDelayMs: number = script.readyDelayMs ?? 0;
 
 interface RpcCommand {
   id?: string;
@@ -38,6 +41,7 @@ let hostTools: Array<{ name: string }> = [];
 
 const out = (o: unknown) => process.stdout.write(`${JSON.stringify(o)}\n`);
 
+if (readyDelayMs > 0) await Bun.sleep(readyDelayMs);
 out({
   type: "ready", protocolVersion: 1, supportedProtocolVersions: [1, 2],
   maxFrameBytes: 1048576, maxReassembledFrameBytes: 67108864,

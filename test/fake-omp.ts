@@ -6,9 +6,10 @@
  * FAKE_OMP_SCRIPT is JSON:
  *   { turnCostUsd, toolCallsPerTurn, replies: string[],
  *     nonTerminalFirst: boolean, askOnTurn: number | null,
- *     turnDelayMs: number, crashAfterPrompt: boolean, readyDelayMs: number }
+ *     turnDelayMs: number, crashAfterPrompt: boolean, readyDelayMs: number,
+ *     spawnGrandchild: boolean }
  */
-export {}; // top-level for-await below needs this file to be a module
+import { writeFileSync } from "node:fs";
 
 const script = JSON.parse(process.env.FAKE_OMP_SCRIPT ?? "{}");
 const turnCostUsd: number = script.turnCostUsd ?? 0.01;
@@ -26,6 +27,10 @@ const crashAfterPrompt: boolean = script.crashAfterPrompt ?? false;
 // Delays the initial ready frame, so a test can act (e.g. send a signal)
 // while a host's client.start() is still genuinely pending.
 const readyDelayMs: number = script.readyDelayMs ?? 0;
+// Stands in for a bash tool call: a real descendant process, not a fake
+// frame. Its pid is written to grandchild.pid in this process's cwd (the
+// task workdir) so a test can check it's actually gone after teardown.
+const spawnGrandchild: boolean = script.spawnGrandchild ?? false;
 
 interface RpcCommand {
   id?: string;
@@ -46,6 +51,11 @@ out({
   type: "ready", protocolVersion: 1, supportedProtocolVersions: [1, 2],
   maxFrameBytes: 1048576, maxReassembledFrameBytes: 67108864,
 });
+
+if (spawnGrandchild) {
+  const gc = Bun.spawn(["sleep", "120"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+  writeFileSync("grandchild.pid", String(gc.pid));
+}
 
 function stats() {
   return {

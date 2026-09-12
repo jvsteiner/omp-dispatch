@@ -89,6 +89,16 @@ export async function runBroker(opts: BrokerOptions): Promise<RunResult> {
   // hold on to the child's own `exited` promise — RpcClient's `#process` is
   // a private field with no public getter, but `exited` on the object this
   // returns is the same hook a caller-owned process would have.
+  //
+  // `detached: true` calls setsid() on POSIX, making the agent process both
+  // a new session leader and the leader of a fresh process group (pgid ==
+  // its own pid). Anything IT spawns without detaching itself again — in
+  // particular every bash tool call omp runs — inherits that same pgid.
+  // Killing by PID alone (RpcClient's default ptree.spawn-backed transport
+  // uses Process.terminate(), which kills descendants; a bare
+  // `proc.kill()` here would not) only reaches the direct child and leaves
+  // those descendants running against a workspace teardown just unlocked.
+  // Signaling the negative PID targets the whole group instead.
   let childExited: Promise<number> | undefined;
   const spawnAgent = (agentArgs: string[]): RpcAgentProcess => {
     const argv = [...(opts.command ?? ["bun", opts.cliPath ?? OMP_CLI]), ...agentArgs];
@@ -96,11 +106,11 @@ export async function runBroker(opts: BrokerOptions): Promise<RunResult> {
       cwd: task.workdir,
       env: { ...process.env, CLAUDE_CONFIG_DIR: emptyConfig } as Record<string, string>,
       stdin: "pipe", stdout: "pipe", stderr: "pipe",
+      detached: true,
     });
-    childExited = proc.exited;
 
     let stderrTail = "";
-    void (async () => {
+    const stderrDrained = (async () => {
       const reader = proc.stderr.getReader();
       const decoder = new TextDecoder();
       try {
@@ -112,22 +122,43 @@ export async function runBroker(opts: BrokerOptions): Promise<RunResult> {
       } catch { /* the pipe just closes when the child exits */ }
     })();
 
+    // rpc-client.ts's own exit handling (see its comment around the 250ms
+    // race in start()) assumes `exited` only settles once the stderr tail
+    // is complete, so a startup failure's error message always carries the
+    // real stderr instead of an empty one read too early. Bun's raw
+    // `proc.exited` alone doesn't wait for our own background drain loop
+    // above to finish; chain it so peekStderr() is never read mid-drain.
+    const exited = proc.exited.then(async code => {
+      await stderrDrained.catch(() => {});
+      return code;
+    });
+    childExited = exited;
+
+    const killGroup = (signal: number | NodeJS.Signals) => {
+      try {
+        process.kill(-proc.pid, signal);
+      } catch {
+        // The group may already be empty/gone, or (unexpectedly) killing by
+        // group may not be available — fall back to the direct child so a
+        // real failure here isn't silently swallowed.
+        try { proc.kill(signal); } catch { /* already dead */ }
+      }
+    };
+
     return {
       stdin: proc.stdin,
       stdout: proc.stdout,
       peekStderr: () => stderrTail,
       kill: (signal, graceMs) => {
-        try { proc.kill((signal as number | NodeJS.Signals | undefined) ?? "SIGTERM"); } catch { /* already dead */ }
+        killGroup((signal as number | NodeJS.Signals | undefined) ?? "SIGTERM");
         if (graceMs !== undefined && graceMs >= 0) {
           const escalate = setTimeout(() => {
-            if (proc.exitCode === null) {
-              try { proc.kill("SIGKILL"); } catch { /* already dead */ }
-            }
+            if (proc.exitCode === null) killGroup("SIGKILL");
           }, graceMs);
           escalate.unref?.();
         }
       },
-      exited: proc.exited,
+      exited,
     };
   };
 

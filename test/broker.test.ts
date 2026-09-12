@@ -8,6 +8,16 @@ import { runBroker } from "../src/broker.ts";
 import { newRunId, createRunDir } from "../src/rundir.ts";
 import type { TaskSpec } from "../src/taskfile.ts";
 
+// Signal 0 sends nothing; it just probes whether the pid still exists.
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // Polls a run's progress.log for a substring instead of a fixed sleep, so
 // tests that need the broker to have reached a certain point (paths locked,
 // child started) aren't tuned to a guessed delay.
@@ -375,4 +385,47 @@ test("finish still settles as an error when unlockPaths itself fails (a real chm
   expect(log).toContain("failed to unlock paths");
 
   chmodSync(sub, 0o700);   // restore so the tmp dir can be cleaned up normally
+}, 30_000);
+
+// --- Fix round 3 addition ---------------------------------------------------
+
+// New Important regression from the I4 rewrite: the custom spawn's kill()
+// used a bare proc.kill(), which only reaches the direct agent process, not
+// its descendants — the exact shape of omp's own bash tool calls. RpcClient's
+// default ptree.spawn-backed transport routes kill() through
+// Process.terminate(), which kills descendants too; bypassing it with a
+// custom spawn silently lost that. spawnGrandchild stands in for a bash tool
+// call: a real descendant process (not a fake frame) that must not survive
+// teardown.
+//
+// Verified: reverting src/broker.ts's spawnAgent to spawn without
+// `detached: true` and kill with a bare `proc.kill(signal)` (the exact code
+// this replaced) reproduces exactly what was reported — the grandchild is
+// still alive after the SIGINT and teardown complete. With detached + the
+// process-group kill restored, it's gone within the poll window below.
+test("teardown kills the whole process tree, not just the direct agent process", async () => {
+  const s = setup({ spawnGrandchild: true, turnDelayMs: 2000 });
+  const before = new Set(process.listeners("SIGINT"));
+  const p = runBroker(s);
+  await waitForProgress(s.runDir, "START");
+
+  const pidFile = join(s.task.workdir, "grandchild.pid");
+  const deadline = Date.now() + 5000;
+  while (!existsSync(pidFile)) {
+    if (Date.now() > deadline) throw new Error("timed out waiting for grandchild.pid");
+    await new Promise(r => setTimeout(r, 5));
+  }
+  const gcPid = Number(readFileSync(pidFile, "utf8").trim());
+  expect(isAlive(gcPid)).toBe(true);   // sanity: the descendant actually started
+
+  const added = process.listeners("SIGINT").filter(l => !before.has(l));
+  expect(added.length).toBe(1);
+  (added[0] as (...a: unknown[]) => void)("SIGINT");
+  await p;
+
+  const aliveDeadline = Date.now() + 3000;
+  while (isAlive(gcPid) && Date.now() < aliveDeadline) {
+    await new Promise(r => setTimeout(r, 20));
+  }
+  expect(isAlive(gcPid)).toBe(false);
 }, 30_000);

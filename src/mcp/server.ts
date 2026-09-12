@@ -6,7 +6,7 @@ import { loadProviderKeys } from "../env.ts";
 import { loadTierConfig, resolveModel } from "../models.ts";
 import { startRun } from "../runner.ts";
 import { newRunId, createRunDir } from "../rundir.ts";
-import { createRegistry, uniqueName } from "./runs.ts";
+import { createRegistry, uniqueName, type RunRegistry } from "./runs.ts";
 
 /**
  * Shell out to `omp` and return its stdout, trimmed. Every tool that talks to
@@ -62,6 +62,16 @@ export interface CreateServerOptions {
    * this constructor argument is the one seam that can't be hit that way.
    */
   command?: string[];
+
+  /**
+   * Supplies the run registry instead of creating a fresh one. Lets
+   * runStdioServer() below hold the exact same registry a SIGTERM/SIGINT/
+   * stdin-end handler must dispose directly — see the comment there for why
+   * the onclose hook wired below is not enough on its own in production.
+   * Tests never pass this; every InMemoryTransport-based server gets its own
+   * registry via the default.
+   */
+  registry?: RunRegistry;
 }
 
 export function createServer(opts: CreateServerOptions = {}): McpServer {
@@ -73,16 +83,21 @@ export function createServer(opts: CreateServerOptions = {}): McpServer {
   // both see the name free, since nothing is added to the registry itself
   // until well after the run has settled. A name is reserved synchronously,
   // with no `await` in between, the instant it is chosen.
-  const registry = createRegistry();
+  const registry = opts.registry ?? createRegistry();
   const reserved = new Set<string>();
   const isTaken = (n: string) => registry.has(n) || reserved.has(n);
 
   // Every successful dispatch's omp process is `detached: true` (see
   // runner.ts) and deliberately outlives the run that started it, so a later
   // omp_send_message can resume it. Nothing else reaps those processes, so
-  // wire the registry's teardown to the transport closing — client
-  // disconnect, an explicit close(), or this process exiting — or a server
-  // shutdown leaks every still-open run.
+  // this disposes the registry when the transport actually closes —
+  // reliable under InMemoryTransport (every test in this file but one), but
+  // NOT under the production StdioServerTransport: the SDK's server/stdio.js
+  // registers no 'end'/'close' listener on stdin and this process installs
+  // no SIGTERM/SIGINT handler of its own, so transport.close() (onclose's
+  // only caller) never runs on a real shutdown. runStdioServer() below is
+  // what actually covers that gap, directly against the same `registry` via
+  // the option above — onclose alone cannot, no matter what it's wired to.
   server.server.onclose = () => {
     void registry.disposeAll();
   };
@@ -166,12 +181,15 @@ export function createServer(opts: CreateServerOptions = {}): McpServer {
           runId,
         );
 
-        // omp_agent blocks for as long as the run takes, which can be many
-        // minutes — well past MCP's own 60s default request timeout on
-        // whichever client called this tool. A progress notification resets
-        // that timeout on any client that asked for one (resetTimeoutOnProgress
-        // plus a progressToken in the request), so only sent when the caller
-        // actually supplied a progressToken; nothing to reset otherwise.
+        // omp_agent blocks for as long as the run takes. Claude Code's own
+        // per-call wall clock (MCP_TOOL_TIMEOUT) is generous — on the order
+        // of 28 hours — and MCP_TIMEOUT's 30s only bounds server *startup*,
+        // not a tool call in flight, so neither is what this guards against.
+        // What actually needs resetting is stdio's own ~30-minute idle
+        // timeout on the connection; a progress notification resets that on
+        // any client that asked for one (resetTimeoutOnProgress plus a
+        // progressToken in the request), so only sent when the caller
+        // actually supplied a progressToken — nothing to reset otherwise.
         // Interval read per call, like OMP_DISPATCH_POLL_MS in runner.ts, so
         // a test can shrink it without a module-load-time freeze.
         const progressToken = extra._meta?.progressToken;
@@ -267,6 +285,37 @@ export function createServer(opts: CreateServerOptions = {}): McpServer {
   return server;
 }
 
+/**
+ * Connects a server to real stdio and makes sure every dispatched run's
+ * process tree is disposed before this process actually exits. Split out
+ * from the `if (import.meta.main)` block below so a test can drive this
+ * exact wiring — a real child process, a real StdioServerTransport, a real
+ * SIGTERM/stdin shutdown — instead of only ever exercising InMemoryTransport,
+ * which (per the onclose comment in createServer()) hides the very gap this
+ * exists to close.
+ */
+export async function runStdioServer(opts: CreateServerOptions = {}): Promise<void> {
+  const registry = createRegistry();
+  const server = createServer({ ...opts, registry });
+
+  // See the onclose comment in createServer(): the SDK's stdio transport
+  // calls onclose on exactly nothing in a real shutdown, so this is the only
+  // place SIGTERM, SIGINT, and the parent closing its end of stdin are
+  // actually handled. Awaited before exiting — a bare `void` here would race
+  // process.exit() against disposeAll()'s own async work (killing every
+  // run's process group, restoring locked paths). Safe to fire from more
+  // than one of these listeners: disposeAll() snapshots and clears its map
+  // synchronously before awaiting anything, so a second concurrent call just
+  // finds an empty map and returns immediately.
+  const shutdown = () => registry.disposeAll().finally(() => process.exit(0));
+  process.on("SIGTERM", () => void shutdown());
+  process.on("SIGINT", () => void shutdown());
+  process.stdin.on("end", () => void shutdown());
+  process.stdin.on("close", () => void shutdown());
+
+  await server.connect(new StdioServerTransport());
+}
+
 if (import.meta.main) {
-  await createServer().connect(new StdioServerTransport());
+  await runStdioServer();
 }

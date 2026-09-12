@@ -1,11 +1,12 @@
 import { test, expect, afterEach, beforeAll, afterAll } from "bun:test";
-import { mkdtempSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { createServer } from "../src/mcp/server.ts";
-import { createRegistry } from "../src/mcp/runs.ts";
+import { createRegistry, uniqueName } from "../src/mcp/runs.ts";
 import { startRun } from "../src/runner.ts";
 import { newRunId, createRunDir } from "../src/rundir.ts";
 
@@ -246,13 +247,16 @@ test("omp_agent disposes a run it does not keep in the registry, killing its who
   expect(isAlive(gcPid)).toBe(false);
 }, 30_000);
 
-// MCP's default request timeout is 60s (DEFAULT_REQUEST_TIMEOUT_MSEC); a real
-// subagent dispatch can run for many minutes. omp_agent keeps a client's own
-// timeout from firing by sending progress notifications, but only a client
-// that actually asks for them (resetTimeoutOnProgress + a progressToken,
-// supplied here via the SDK's own `onprogress` option) benefits — this drives
-// a real MCP Client end to end, not a mock, with a deliberately short timeout
-// the fake's own turn duration would otherwise blow through.
+// Claude Code's own per-call wall clock (MCP_TOOL_TIMEOUT) is generous
+// enough (~28h) that a real dispatch is never at risk from it, and
+// MCP_TIMEOUT's 30s only bounds server startup, not a call in flight — the
+// thing actually worth guarding against is stdio's own ~30-minute
+// connection-idle timeout, which the SDK's Client models generically as
+// resetTimeoutOnProgress on any request that opts in (a progressToken,
+// supplied here via the SDK's own `onprogress` option). This drives a real
+// MCP Client end to end, not a mock, with a deliberately short timeout the
+// fake's own turn duration would otherwise blow through, standing in for
+// that idle window without an actual 30-minute wait.
 test("a long-running dispatch survives the calling client's own request timeout via progress notifications", async () => {
   const workdir = tmpWorkdir();
   process.env.OMP_DISPATCH_PROGRESS_MS = "40";
@@ -305,3 +309,81 @@ test("disposeAll settles and disposes every registered run", async () => {
   expect(isAlive(gcPid)).toBe(false);
   expect(registry.list()).toEqual([]);
 }, 30_000);
+
+// Finding 5's whole point: InMemoryTransport (every test above) reliably
+// calls onclose on client.close(), which made the registry-level test above
+// pass even though production's real StdioServerTransport does not call
+// onclose on a real shutdown at all (server/stdio.js registers no
+// 'end'/'close' listener on stdin and installs no SIGTERM/SIGINT handler —
+// see the onclose comment in src/mcp/server.ts). A test that only exercised
+// InMemoryTransport would have stayed green with that gap wide open. This
+// spawns a REAL child process running the REAL runStdioServer() bootstrap,
+// talks to it over a REAL StdioClientTransport, and shuts it down exactly
+// the way that transport's own close() does: stdin.end(), then (if that
+// doesn't land in time) SIGTERM, then SIGKILL.
+//
+// Verified by mutation: with the SIGTERM/SIGINT/stdin 'end'/'close'
+// listeners removed from runStdioServer(), this test fails with the
+// grandchild still alive after client.close() returns; restored, it passes.
+test("a real stdio shutdown (stdin end, then SIGTERM, then SIGKILL) disposes every dispatched run's process tree", async () => {
+  const workdir = tmpWorkdir();
+  const scriptDir = mkdtempSync(join(tmpdir(), "omp-agent-stdio-"));
+  const scriptPath = join(scriptDir, "run-server.ts");
+  const serverPath = new URL("../src/mcp/server.ts", import.meta.url).pathname;
+  writeFileSync(scriptPath, `
+import { runStdioServer } from ${JSON.stringify(serverPath)};
+await runStdioServer({ command: ${JSON.stringify(FAKE_COMMAND)} });
+`);
+
+  const transport = new StdioClientTransport({
+    command: "bun",
+    args: [scriptPath],
+    env: {
+      ...(process.env as Record<string, string>),
+      FAKE_OMP_SCRIPT: JSON.stringify({ spawnGrandchild: true }),
+    },
+  });
+  const client = new Client({ name: "test", version: "0" }, { capabilities: {} });
+  await client.connect(transport);
+
+  try {
+    const r: any = await client.callTool({
+      name: "omp_agent",
+      arguments: { description: "spawn a grandchild", prompt: "go", workdir },
+    });
+    expect(r.isError).toBeFalsy();
+
+    const pidFile = join(workdir, "grandchild.pid");
+    await waitForFile(pidFile);
+    const gcPid = Number(readFileSync(pidFile, "utf8").trim());
+    expect(isAlive(gcPid)).toBe(true);   // sanity: the descendant actually started
+
+    // The SDK's own client-side shutdown sequence — see
+    // StdioClientTransport.close() in @modelcontextprotocol/sdk: stdin.end(),
+    // then SIGTERM if the process hasn't exited within ~2s, then SIGKILL if
+    // it still hasn't.
+    await client.close();
+
+    const deadline = Date.now() + 5000;
+    while (isAlive(gcPid) && Date.now() < deadline) {
+      await new Promise(r2 => setTimeout(r2, 20));
+    }
+    expect(isAlive(gcPid)).toBe(false);
+  } finally {
+    await client.close().catch(() => {});
+  }
+}, 30_000);
+
+// Regression for the trailing-dash bug fixed this round: slicing to 40 chars
+// after the dash-trim (rather than before) could cut a description right
+// after a separator, leaving the slug ending in "-" and, on collision,
+// producing a double dash ("...a--2") instead of "...a-2".
+test("uniqueName trims a trailing dash left by slicing, including on collision", () => {
+  const desc = `${"a".repeat(39)}-${"b".repeat(10)}`;   // the 40th char is "-"
+  const taken = new Set<string>();
+  const first = uniqueName(desc, n => taken.has(n));
+  expect(first).toBe("a".repeat(39));
+  taken.add(first);
+  const second = uniqueName(desc, n => taken.has(n));
+  expect(second).toBe(`${"a".repeat(39)}-2`);
+});

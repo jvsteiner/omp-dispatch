@@ -5,7 +5,8 @@
  *
  * FAKE_OMP_SCRIPT is JSON:
  *   { turnCostUsd, toolCallsPerTurn, replies: string[],
- *     nonTerminalFirst: boolean, askOnTurn: number | null }
+ *     nonTerminalFirst: boolean, askOnTurn: number | null,
+ *     turnDelayMs: number, crashAfterPrompt: boolean }
  */
 export {}; // top-level for-await below needs this file to be a module
 
@@ -15,6 +16,13 @@ const toolCallsPerTurn: number = script.toolCallsPerTurn ?? 2;
 const replies: string[] = script.replies ?? ["done"];
 const nonTerminalFirst: boolean = script.nonTerminalFirst ?? false;
 const askOnTurn: number | null = script.askOnTurn ?? null;
+// Keeps a turn "in flight" (cost already incurred, no terminal frame yet)
+// long enough for something else — a host's periodic budget poll — to
+// observe it before agent_end arrives.
+const turnDelayMs: number = script.turnDelayMs ?? 0;
+// Simulates omp dying mid-turn (e.g. an OOM kill): the prompt is acked, then
+// the process exits before ever reporting agent_end.
+const crashAfterPrompt: boolean = script.crashAfterPrompt ?? false;
 
 interface RpcCommand {
   id?: string;
@@ -68,6 +76,8 @@ async function runTurn() {
   }
   cost += turnCostUsd;
 
+  if (turnDelayMs > 0) await Bun.sleep(turnDelayMs);
+
   if (nonTerminalFirst && turns === 1) {
     out({ type: "agent_end", messages: [], isTerminal: false });   // must NOT count
   }
@@ -105,6 +115,7 @@ for await (const line of console) {
       break;
     case "prompt": case "follow_up": case "steer":
       ok({ agentInvoked: true });
+      if (crashAfterPrompt) { setTimeout(() => process.exit(1), 20); break; }
       void runTurn();
       break;
     case "abort":

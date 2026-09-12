@@ -296,6 +296,7 @@ export async function startRun(
     clearTimeout(wallClock);
     clearInterval(costPoll);
 
+    let statsError: unknown;
     try {
       if (stopped !== "completed") await client.abort().catch(() => {});
       try {
@@ -305,20 +306,14 @@ export async function startRun(
         result.session_file = s.sessionFile ?? null;
         result.last_reply = await client.getLastAssistantText();
       } catch (e) {
+        // Captured, not logged here — see the logging block at the end.
         // Every other failure in this file is logged; this one used to
-        // swallow, which can leave the spend figure a full turn short with
-        // nothing in progress.log to say why. Deliberately NOT escalated:
-        // the run has already settled by the time this runs, and
+        // swallow entirely, which can leave the spend figure a full turn
+        // short with nothing in progress.log to say why. Deliberately NOT
+        // escalated: the run has already settled by the time this runs, and
         // refreshStats()'s counter is the mechanism for stats failures that
         // still matter. This is about visibility only.
-        //
-        // Its own try/catch because a throw from appendProgress (an
-        // unwritable progress.log) would otherwise skip unlockPaths below
-        // and leave the workspace read-only — the exact failure the guards
-        // further down exist to prevent.
-        try {
-          appendProgress(runDir, `ERROR the final get_session_stats failed — cost and last reply may be short: ${String(e)}`);
-        } catch { /* best effort */ }
+        statsError = e;
       }
       // Deliberately NO client.stop() here. Settling a run and releasing the
       // agent are now separate: the MCP server owns the process and calls
@@ -330,17 +325,25 @@ export async function startRun(
       // (a chmod failure, or `git status` failing), so each gets its own
       // guard instead of one bare await that would abandon the rest of the
       // teardown — and, in the unlock case, leave paths unwritable forever.
-      let unlockFailed = false;
+      //
+      // Every failure above is CAPTURED and logged at the end, after the
+      // result has been assigned. Nothing in this function may log before
+      // that assignment: appendProgress can itself throw on an unwritable
+      // progress.log, and a throw between a failure and the assignment skips
+      // the assignment, so `settled` resolves a FINISHED run still claiming
+      // state:"running". That is this guard's own symptom reached by another
+      // route, and ordering — not another wrapper — is what removes it.
+      let unlockError: unknown;
       try {
         await unlockPaths(opts.workdir, readonly);
       } catch (e) {
-        unlockFailed = true;
-        appendProgress(runDir, `ERROR failed to unlock paths — workspace may still be read-only: ${String(e)}`);
+        unlockError = e;
       }
+      let gitError: unknown;
       try {
         result.files_changed = await gitChangedSince(opts.workdir, before);
       } catch (e) {
-        appendProgress(runDir, `ERROR failed to compute files_changed: ${String(e)}`);
+        gitError = e;
       }
 
       result.seconds = Math.round((Date.now() - state.startedAt) / 1000);
@@ -348,6 +351,7 @@ export async function startRun(
       // A failed unlock means the workspace may still be unwritable — a more
       // urgent fact than whatever originally stopped the run, so it overrides
       // the reported outcome instead of being buried in a log line only.
+      const unlockFailed = unlockError !== undefined;
       result.stopped_because = unlockFailed ? "error" : stopped;
       result.state = unlockFailed ? "error" : (
         stopped === "completed" ? "completed"
@@ -355,6 +359,23 @@ export async function startRun(
         : stopped === "error" ? "error"
         : stopped === "asking" ? "asking"
         : "capped");
+
+      // The result is now true whatever happens next, so these can throw
+      // freely. The one wrapper left is NOT protecting the result — that is
+      // the ordering's job — it only stops a lost log line becoming an
+      // unhandled rejection on the poll and wall-clock paths, which call
+      // finish() with `void`.
+      try {
+        if (statsError !== undefined) {
+          appendProgress(runDir, `ERROR the final get_session_stats failed — cost and last reply may be short: ${String(statsError)}`);
+        }
+        if (unlockError !== undefined) {
+          appendProgress(runDir, `ERROR failed to unlock paths — workspace may still be read-only: ${String(unlockError)}`);
+        }
+        if (gitError !== undefined) {
+          appendProgress(runDir, `ERROR failed to compute files_changed: ${String(gitError)}`);
+        }
+      } catch { /* a lost log line must not become an unhandled rejection */ }
     } finally {
       // settled(result) and a best-effort write/log must happen regardless of
       // what threw above — an unhandled throw here would leave `settled` (and

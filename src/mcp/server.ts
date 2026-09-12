@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { join } from "node:path";
+import { readFileSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { loadProviderKeys } from "../env.ts";
@@ -214,6 +215,14 @@ export function createServer(opts: CreateServerOptions = {}): McpServer {
           runId,
         );
 
+        // Registered the moment the run exists, not once it settles: steering
+        // it, tailing it or stopping it are only useful WHILE it is running,
+        // and omp_agent blocks for the whole of that. The omp process
+        // deliberately outlives the run so a later omp_send_message can
+        // resume it, so dispose() is the registry's job from here on — except
+        // on the error path below, which removes and disposes it.
+        registry.add(runName, handle);
+
         // omp_agent blocks for as long as the run takes. Claude Code's own
         // per-call wall clock (MCP_TOOL_TIMEOUT) is generous — on the order
         // of 28 hours — and MCP_TIMEOUT's 30s only bounds server *startup*,
@@ -251,9 +260,10 @@ export function createServer(opts: CreateServerOptions = {}): McpServer {
         // runner could not recover from) reaches state "error", and that is
         // the one case this throws instead of returning a footer.
         if (result.state === "error") {
-          // Not kept in the registry, so it must be disposed here: Task 3
+          // Dropped from the registry, so it must be disposed here: Task 3
           // deliberately leaves a settled run's omp process alive until
           // dispose(), and any handle dropped without that call leaks it.
+          registry.remove(runName);
           await handle.dispose();
           throw new Error(
             `omp_agent: run '${runName}' (${runId}) did not complete: ` +
@@ -261,10 +271,6 @@ export function createServer(opts: CreateServerOptions = {}): McpServer {
           );
         }
 
-        // Kept deliberately: the omp process stays alive so a later
-        // omp_send_message can resume this run. dispose() is someone else's
-        // job from here on.
-        registry.add(runName, handle);
 
         // Sourced from RunResult.model, not the resolved request string: it
         // is filled from the agent's own reported state (runner.ts, via
@@ -283,6 +289,115 @@ export function createServer(opts: CreateServerOptions = {}): McpServer {
         clearInterval(progressTimer);
         reserved.delete(runName);
       }
+    },
+  );
+
+  // --- conversation: the native-parity half of the surface -----------------
+  //
+  // Each of these names a run the way Agent's own companions do. A run that
+  // cannot be found is always an error naming it AND listing what does exist:
+  // the caller has just mistyped a name it will have to get right to continue,
+  // and a bare "not found" makes it guess.
+
+  const mustFind = (name: string, tool: string) => {
+    const handle = registry.get(name);
+    if (!handle) {
+      const known = registry.list().map(r => r.name).sort();
+      throw new Error(
+        `${tool}: no run named '${name}'. ` +
+          (known.length ? `Running or finished: ${known.join(", ")}.` : `No runs yet.`),
+      );
+    }
+    return handle;
+  };
+
+  server.tool(
+    "omp_send_message",
+    "Continue a run with a follow-up, keeping its context — the omp equivalent of " +
+      "SendMessage. Works on a run that has already finished: it is resumed rather than " +
+      "restarted. A run that stopped for any other reason (a cap, an abort, an error) " +
+      "refuses, naming the reason. Blocks until the new turn settles and returns its reply.",
+    {
+      to: z.string().describe("The run's name, as returned by omp_agent or omp_list_agents."),
+      message: z.string().describe("The follow-up to send."),
+    },
+    async ({ to, message }) => {
+      const handle = mustFind(to, "omp_send_message");
+      const reply = await handle.say(message);
+      const r = handle.result;
+      const footer =
+        `\n\n---\n[omp:${to}] turns=${r.turns} tool_calls=${r.tool_calls} ` +
+        `cost_usd=${r.cost_usd.toFixed(4)} seconds=${r.seconds} ` +
+        `stopped_because=${r.stopped_because}`;
+      return { content: [{ type: "text", text: (reply || "(no reply)") + footer }] };
+    },
+  );
+
+  server.tool(
+    "omp_steer",
+    "Interrupt the turn a run is in the middle of, with a correction. Native subagents " +
+      "cannot do this — use it when an agent is visibly going the wrong way and you do " +
+      "not want to wait for the turn to finish. Returns as soon as the message is queued.",
+    {
+      to: z.string().describe("The run's name."),
+      message: z.string().describe("The steering message."),
+    },
+    async ({ to, message }) => {
+      await mustFind(to, "omp_steer").steer(message);
+      return { content: [{ type: "text", text: `steered '${to}'` }] };
+    },
+  );
+
+  server.tool(
+    "omp_list_agents",
+    "List every omp run this session has started, running or finished, with its state, " +
+      "turns and cost so far.",
+    {},
+    async () => {
+      const runs = registry.list();
+      if (runs.length === 0) {
+        return { content: [{ type: "text", text: "No omp agents have run in this session." }] };
+      }
+      const lines = runs.map(({ name, handle }) => {
+        const r = handle.result;
+        return `${name}  ${r.state.padEnd(10)} turns=${r.turns} ` +
+          `cost_usd=${r.cost_usd.toFixed(4)} ${r.stopped_because ?? ""}`.trimEnd();
+      });
+      return { content: [{ type: "text", text: lines.join("\n") }] };
+    },
+  );
+
+  server.tool(
+    "omp_task_output",
+    "Show what a run has been doing — its progress log, newest last. Use it on a run in " +
+      "flight to see where it has got to without interrupting it.",
+    {
+      name: z.string().describe("The run's name."),
+      lines: z.number().optional().describe("How many trailing lines to show. Default 40."),
+    },
+    async ({ name, lines }) => {
+      const handle = mustFind(name, "omp_task_output");
+      const log = join(handle.runDir, "progress.log");
+      let text: string;
+      try {
+        text = readFileSync(log, "utf8");
+      } catch {
+        return { content: [{ type: "text", text: `run '${name}' has produced no progress log yet` }] };
+      }
+      const all = text.split("\n").filter(Boolean);
+      return { content: [{ type: "text", text: all.slice(-(lines ?? 40)).join("\n") }] };
+    },
+  );
+
+  server.tool(
+    "omp_task_stop",
+    "Stop a run. It settles as aborted and its report reflects whatever it had done. The " +
+      "omp process stays until the server shuts down, so a stopped run can still be " +
+      "inspected with omp_task_output.",
+    { name: z.string().describe("The run's name.") },
+    async ({ name }) => {
+      await mustFind(name, "omp_task_stop").stop();
+      return { content: [{ type: "text", text: `stopped '${name}'` }] };
     },
   );
 

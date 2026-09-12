@@ -27,6 +27,8 @@ export interface RunOptions {
 
 export interface RunHandle {
   runId: string;
+  /** Where this run's progress.log, events.jsonl and result.json live. */
+  runDir: string;
   /** The live result object — mutated as the run progresses. */
   result: RunResult;
   /** Resolves once the run has settled, whatever stopped it. */
@@ -152,7 +154,7 @@ export async function startRun(
       throw new Error(`run ${runId}: never started — failed to lock paths under ${opts.workdir}`);
     };
     return {
-      runId, result, settled: Promise.resolve(result),
+      runId, runDir, result, settled: Promise.resolve(result),
       say: neverStarted, steer: neverStarted,
       stop: async () => {}, dispose: async () => {},
     };
@@ -637,6 +639,7 @@ export async function startRun(
 
   return {
     runId,
+    runDir,
     result,
     // A getter, not a captured value: a resumed run installs a NEW settle
     // promise, and a caller holding the old one would wait forever.

@@ -470,16 +470,95 @@ export async function startRun(opts: RunOptions, runDir: string, runId: string):
 
 ---
 
-### Task 4: `omp_agent`
+### Task 4: `omp_agent` — the tool Claude actually calls
 
-**Files:** Modify `src/mcp/server.ts`; Test: `test/omp-agent.test.ts`
+**Files:**
+- Modify: `src/mcp/server.ts`
+- Create: `src/mcp/runs.ts` (the run registry)
+- Test: `test/omp-agent.test.ts`
 
-`omp_agent(description, prompt, subagent_type?, model?, name?, isolation?, workdir?)` → the agent's final report as text, plus a compact footer: turns, cost, tool calls, files changed, stop reason.
+**Interfaces:**
+```ts
+// src/mcp/runs.ts
+export interface RunRegistry {
+  add(name: string, handle: RunHandle): void;
+  get(name: string): RunHandle | undefined;
+  has(name: string): boolean;
+  list(): Array<{ name: string; handle: RunHandle }>;
+  remove(name: string): void;
+  disposeAll(): Promise<void>;
+}
+export function createRegistry(): RunRegistry;
+export function uniqueName(desc: string, taken: (n: string) => boolean): string;
+```
 
-- [ ] **Step 1:** failing tests — a dispatch against `test/fake-omp.ts` returns the fake's reply; a cap breach is reported in the footer, not thrown; two concurrent dispatches get distinct names; a duplicate explicit `name` is rejected naming the clash.
-- [ ] **Step 2:** run, expect FAIL
-- [ ] **Step 3:** implement — resolve model (Task 2), start run (Task 3), `await handle.settled`, keep the handle in `Map<name, RunHandle>` so Task 6 can reach it.
-- [ ] **Step 4:** run, PASS. **Step 5:** commit.
+**The signature mirrors the native `Agent` tool deliberately** — same parameter names, so an
+existing workflow carries over unchanged:
+
+`omp_agent({ description, prompt, subagent_type?, model?, name?, isolation?, workdir? })`
+
+Returns the agent's final report as text, followed by a compact footer.
+
+**Three requirements that are easy to miss:**
+
+1. **The `model` parameter's description must advertise raw model ids**, not only tiers. If
+   the schema mentions only `haiku`/`sonnet`/`opus`, a caller never learns it may pass
+   `deepseek/deepseek-v4-pro`, and the most direct control in the design becomes invisible.
+   Word it: *"A tier name from your config (haiku, sonnet, opus, or one of your own), or any
+   omp model id such as `deepseek/deepseek-v4-pro`. Run `omp_models` to see what is
+   available."*
+2. **A settled run's omp process survives until `dispose()`** — Task 3 arranged that
+   deliberately so Task 7 can resume a completed run. `omp_agent` must therefore dispose any
+   handle it does **not** keep in the registry, or every dispatch leaks an omp process.
+3. **A cap breach is a result, not an exception.** A run that hits `max_turns` or `max_usd`
+   returns its report and footer with `stopped_because` set. Only a failure to *start* is an
+   error.
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `test/omp-agent.test.ts`. Drive the MCP server through the in-memory transport the way
+`test/mcp-server.test.ts` does, and point every run at `test/fake-omp.ts` through the runner's
+`command` option — no provider is contacted.
+
+```ts
+test("a dispatch returns the agent's final reply", async () => {});
+test("the footer carries turns, cost, tool calls and stop reason", async () => {});
+test("a cap breach is reported in the footer, not thrown", async () => {});
+test("the model parameter's description advertises raw model ids", async () => {});
+test("an explicit model is passed through verbatim, not treated as a tier", async () => {});
+test("two concurrent dispatches get distinct names", async () => {});
+test("a duplicate explicit name is rejected naming the clash", async () => {});
+test("a run that fails to start is an error, not a footer", async () => {});
+test("disposeAll settles and disposes every registered run", async () => {});
+```
+
+For requirement 2, assert it the way Task 3 asserted teardown: run a dispatch whose fake
+spawns a long-lived grandchild, let it settle, call `disposeAll()`, and check the pid is gone.
+**A test that only checks the registry is empty proves nothing about the process.**
+
+- [ ] **Step 2: Run — expect FAIL**
+
+- [ ] **Step 3: Implement `src/mcp/runs.ts`**
+
+`uniqueName` derives a short slug from `description` and appends a counter on collision. An
+explicit `name` that is already taken is an **error naming the existing run** — never silently
+suffixed, because the caller will use that name with `omp_send_message` and must get the run
+it meant.
+
+- [ ] **Step 4: Implement `omp_agent` in `src/mcp/server.ts`**
+
+Resolve the model with `resolveModel` (Task 2), merge `loadProviderKeys()` into the child env,
+create the run directory with `createRunDir` (v1 `rundir.ts`), `startRun` (Task 3), `await
+handle.settled`, register the handle, then format the report and footer.
+
+- [ ] **Step 5: Run tests — expect PASS**
+
+- [ ] **Step 6: Run the whole suite, then commit**
+
+```bash
+git add src/mcp test/omp-agent.test.ts
+git commit -m "feat(agent): omp_agent dispatches a run and returns its report"
+```
 
 ---
 

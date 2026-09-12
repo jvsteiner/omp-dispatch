@@ -6,7 +6,6 @@ import { loadProviderKeys } from "../env.ts";
 import { loadTierConfig, resolveModel } from "../models.ts";
 import { startRun } from "../runner.ts";
 import { newRunId, createRunDir } from "../rundir.ts";
-import { TASK_DEFAULTS } from "../taskfile.ts";
 import { createRegistry, uniqueName } from "./runs.ts";
 
 /**
@@ -32,25 +31,40 @@ async function runOmp(args: string[], extraEnv: Record<string, string> = {}): Pr
   return result.stdout.toString().trim();
 }
 
-/**
- * Test-only escape hatch: when set, every omp_agent dispatch is launched
- * through this argv (a JSON-encoded array) instead of the real omp CLI.
- * Read per call, not at module load — the same reason src/runner.ts reads
- * OMP_DISPATCH_POLL_MS per call: a module-level constant would be frozen
- * before a test ever gets a chance to set it. Deliberately not part of
- * omp_agent's own schema: its signature mirrors the native Agent tool
- * exactly, and this has no native equivalent.
- */
-function testCommandOverride(): string[] | undefined {
-  const raw = process.env.OMP_DISPATCH_TEST_COMMAND;
-  return raw ? (JSON.parse(raw) as string[]) : undefined;
-}
-
 const MODEL_DESCRIPTION =
   "A tier name from your config (haiku, sonnet, opus, or one of your own), or any omp " +
   "model id such as `deepseek/deepseek-v4-pro`. Run `omp_models` to see what is available.";
 
-export function createServer(): McpServer {
+/**
+ * omp_agent's own defaults — deliberately not src/taskfile.ts's TASK_DEFAULTS,
+ * which exists for the unattended file-driven path where nobody is blocked
+ * waiting on the result. omp_agent blocks a live Claude turn, so maxSeconds
+ * here favors a bounded wait over unattended endurance: the v1 reference run
+ * (docs/specs/2026-09-12-omp-dispatch-design.md) took ~700s end to end, and
+ * 1200s gives roughly double that for a slower model or a retry.
+ */
+const AGENT_DEFAULTS = {
+  tools: "read,write,edit,bash",
+  maxTurns: 120,
+  maxUsd: 1.0,
+  maxSeconds: 1200,
+};
+
+export interface CreateServerOptions {
+  /**
+   * Overrides the agent launcher every omp_agent dispatch uses, passed
+   * straight through to RunOptions.command (see src/runner.ts). Tests point
+   * this at test/fake-omp.ts; production leaves it unset so startRun() falls
+   * back to the real omp CLI. There is deliberately no env-var equivalent:
+   * an env var here would let anything that seeds session environment
+   * (a project settings block, direnv) silently redirect every dispatch to
+   * an arbitrary argv, with provider API keys merged into its environment —
+   * this constructor argument is the one seam that can't be hit that way.
+   */
+  command?: string[];
+}
+
+export function createServer(opts: CreateServerOptions = {}): McpServer {
   const server = new McpServer({ name: "omp-dispatch", version: "0.1.0" });
 
   // Every dispatched run lives here, keyed by name, once it has settled — see
@@ -62,6 +76,16 @@ export function createServer(): McpServer {
   const registry = createRegistry();
   const reserved = new Set<string>();
   const isTaken = (n: string) => registry.has(n) || reserved.has(n);
+
+  // Every successful dispatch's omp process is `detached: true` (see
+  // runner.ts) and deliberately outlives the run that started it, so a later
+  // omp_send_message can resume it. Nothing else reaps those processes, so
+  // wire the registry's teardown to the transport closing — client
+  // disconnect, an explicit close(), or this process exiting — or a server
+  // shutdown leaks every still-open run.
+  server.server.onclose = () => {
+    void registry.disposeAll();
+  };
 
   server.tool(
     "omp_agent",
@@ -92,7 +116,7 @@ export function createServer(): McpServer {
           "working directory.",
       ),
     },
-    async ({ description, prompt, model, name, workdir }) => {
+    async ({ description, prompt, model, name, workdir }, extra) => {
       const targetWorkdir = workdir ?? process.cwd();
 
       let runName: string;
@@ -111,6 +135,7 @@ export function createServer(): McpServer {
       }
       reserved.add(runName);
 
+      let progressTimer: ReturnType<typeof setInterval> | undefined;
       try {
         const home = process.env.HOME ?? "";
         const cfg = loadTierConfig([
@@ -130,16 +155,42 @@ export function createServer(): McpServer {
             prompt,
             model: resolvedModel,
             workdir: targetWorkdir,
-            tools: TASK_DEFAULTS.tools,
-            maxTurns: TASK_DEFAULTS.maxTurns,
-            maxUsd: TASK_DEFAULTS.maxUsd,
-            maxSeconds: TASK_DEFAULTS.maxSeconds,
+            tools: AGENT_DEFAULTS.tools,
+            maxTurns: AGENT_DEFAULTS.maxTurns,
+            maxUsd: AGENT_DEFAULTS.maxUsd,
+            maxSeconds: AGENT_DEFAULTS.maxSeconds,
             env: loadProviderKeys(),
-            command: testCommandOverride(),
+            command: opts.command,
           },
           runDir,
           runId,
         );
+
+        // omp_agent blocks for as long as the run takes, which can be many
+        // minutes — well past MCP's own 60s default request timeout on
+        // whichever client called this tool. A progress notification resets
+        // that timeout on any client that asked for one (resetTimeoutOnProgress
+        // plus a progressToken in the request), so only sent when the caller
+        // actually supplied a progressToken; nothing to reset otherwise.
+        // Interval read per call, like OMP_DISPATCH_POLL_MS in runner.ts, so
+        // a test can shrink it without a module-load-time freeze.
+        const progressToken = extra._meta?.progressToken;
+        if (progressToken !== undefined) {
+          const progressMs = Number(process.env.OMP_DISPATCH_PROGRESS_MS) || 15_000;
+          let n = 0;
+          progressTimer = setInterval(() => {
+            n += 1;
+            void extra.sendNotification({
+              method: "notifications/progress",
+              params: {
+                progressToken,
+                progress: n,
+                message: `run '${runName}': turns=${handle.result.turns} ` +
+                  `cost_usd=${handle.result.cost_usd.toFixed(4)}`,
+              },
+            }).catch(() => {});
+          }, progressMs);
+        }
 
         const result = await handle.settled;
 
@@ -164,8 +215,13 @@ export function createServer(): McpServer {
         // job from here on.
         registry.add(runName, handle);
 
+        // Sourced from RunResult.model, not the resolved request string: it
+        // is filled from the agent's own reported state (runner.ts, via
+        // get_state) and is the one field that can drift from what was
+        // actually asked for.
+        const modelLabel = result.model ? `${result.model.provider}/${result.model.id}` : resolvedModel;
         const footer =
-          `\n\n---\n[omp:${runName}] model=${resolvedModel} turns=${result.turns} ` +
+          `\n\n---\n[omp:${runName}] model=${modelLabel} turns=${result.turns} ` +
           `tool_calls=${result.tool_calls} cost_usd=${result.cost_usd.toFixed(4)} ` +
           `seconds=${result.seconds} stopped_because=${result.stopped_because}`;
 
@@ -173,6 +229,7 @@ export function createServer(): McpServer {
           content: [{ type: "text", text: (result.last_reply ?? "(no reply)") + footer }],
         };
       } finally {
+        clearInterval(progressTimer);
         reserved.delete(runName);
       }
     },

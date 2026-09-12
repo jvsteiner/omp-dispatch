@@ -58,7 +58,8 @@ export function uniqueName(desc: string, taken: (n: string) => boolean): string 
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-")
       .replace(/^-+|-+$/g, "")
-      .slice(0, 40) || "agent";
+      .slice(0, 40)
+      .replace(/^-+|-+$/g, "") || "agent";
   if (!taken(slug)) return slug;
   let n = 2;
   while (taken(`${slug}-${n}`)) n++;

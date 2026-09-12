@@ -282,8 +282,16 @@ export async function startRun(
     args: buildOmpArgs(opts),
   });
 
+  // Re-armable, not one-shot. A completed run can be resumed by say(), and a
+  // resumed run needs its own settle promise — the original has already
+  // resolved, so awaiting it again would hand back the PREVIOUS turn's result.
   let settled: (r: RunResult) => void;
-  const done = new Promise<RunResult>(res => { settled = res; });
+  let done = new Promise<RunResult>(res => { settled = res; });
+  // state.startedAt is re-armed per turn because it is what max_seconds is
+  // measured against. result.seconds must NOT reset with it, so each settled
+  // turn's duration is banked here; otherwise a resumed run would report only
+  // its most recent turn.
+  let bankedSeconds = 0;
   let finishing = false;
   let disposed = false;
   let statsFailures = 0;
@@ -295,6 +303,27 @@ export async function startRun(
   let unsubscribeEvents: (() => void) | undefined;
   let wallClock: ReturnType<typeof setTimeout> | undefined;
   let costPoll: ReturnType<typeof setInterval> | undefined;
+
+  /**
+   * Named so a resumed run can arm a second poll after the first was cleared
+   * in teardown. Reads its interval per call, like the wall clock, so a test
+   * can shrink it without a module-load-time freeze.
+   */
+  const armCostPoll = () => {
+    const pollIntervalMs = Number(process.env.OMP_DISPATCH_POLL_MS) || 15_000;
+    costPoll = setInterval(() => {
+      if (finishing) return;
+      void (async () => {
+        const ok = await refreshStats();
+        if (finishing || !ok) return;
+        const b = breach(state, caps);
+        if (b) {
+          appendProgress(runDir, `POLL breach detected mid-turn: ${b} ($${state.costUsd.toFixed(4)})`);
+          await finish(b);
+        }
+      })();
+    }, pollIntervalMs);
+  };
 
   const finish = async (stopped: NonNullable<RunResult["stopped_because"]>) => {
     if (finishing) return;
@@ -362,7 +391,7 @@ export async function startRun(
         gitError = e;
       }
 
-      result.seconds = Math.round((Date.now() - state.startedAt) / 1000);
+      result.seconds = bankedSeconds + Math.round((Date.now() - state.startedAt) / 1000);
       result.turns = state.turns;
       // A failed unlock means the workspace may still be unwritable — a more
       // urgent fact than whatever originally stopped the run, so it overrides
@@ -437,7 +466,7 @@ export async function startRun(
     }
   }
 
-  unsubscribeEvents = client.onSessionEvent(async (event: any) => {
+  const onSessionEvent = async (event: any) => {
     // rpc-client.ts:1117 calls this listener bare (no try/catch of its own),
     // so an uncaught throw anywhere below — even a plain fs error appending
     // to events.jsonl — would become an unhandled rejection: finish() would
@@ -486,7 +515,9 @@ export async function startRun(
         await finish("error").catch(() => {});
       }
     }
-  });
+  };
+
+  unsubscribeEvents = client.onSessionEvent(onSessionEvent);
 
   wallClock = setTimeout(() => void finish("max_seconds"), opts.maxSeconds * 1000);
 
@@ -522,18 +553,7 @@ export async function startRun(
       // path notices it, and shares `state` rather than a separate copy —
       // both are only ever mutated after a `finishing` check, the same
       // protection the per-turn handler relies on.
-      costPoll = setInterval(() => {
-        if (finishing) return;
-        void (async () => {
-          const ok = await refreshStats();
-          if (finishing || !ok) return;
-          const b = breach(state, caps);
-          if (b) {
-            appendProgress(runDir, `POLL breach detected mid-turn: ${b} ($${state.costUsd.toFixed(4)})`);
-            await finish(b);
-          }
-        })();
-      }, pollIntervalMs);
+      armCostPoll();
 
       const st = await client.getState();
       result.model = st.model ? { provider: st.model.provider, id: st.model.id } : null;
@@ -569,17 +589,77 @@ export async function startRun(
     }
   };
 
+  /**
+   * Re-open a run that settled as `completed`, so a later say() continues the
+   * same agent — parity with a native subagent, where SendMessage resumes a
+   * finished agent from its transcript.
+   *
+   * Only `completed` qualifies. A capped run must not be resumable or the cap
+   * means nothing; an aborted or errored one has nothing coherent to continue.
+   *
+   * The wall clock re-arms for the new turn while turns and cost keep
+   * accumulating — they come from getSessionStats() and are cumulative by
+   * nature, so a resumed run cannot spend its way past max_usd one turn at a
+   * time. Seconds are banked so they accumulate too.
+   */
+  const rearm = () => {
+    if (disposed) {
+      throw new Error(`run ${runId}: say() after dispose() — the omp process is gone`);
+    }
+    if (result.stopped_because !== "completed") {
+      throw new Error(
+        `run ${runId}: cannot resume a run that stopped because ${result.stopped_because} — ` +
+        `only a completed run can be continued`,
+      );
+    }
+    const b = breach(state, caps);
+    if (b) {
+      throw new Error(
+        `run ${runId}: resuming would immediately breach ${b} ` +
+        `($${state.costUsd.toFixed(4)}, ${state.turns} turns) — start a new run instead`,
+      );
+    }
+    bankedSeconds = result.seconds;
+    state.startedAt = Date.now();
+    finishing = false;
+    result.state = "running";
+    result.stopped_because = null;
+    done = new Promise<RunResult>(res => { settled = res; });
+    writeResult(runDir, result);
+    appendProgress(runDir, `RESUME turn ${state.turns + 1}`);
+    // Teardown unsubscribed the listener (deliberately — it is what makes the
+    // double-count guard reachable). Without re-subscribing, the resumed
+    // turn's agent_end has nobody listening and the run never settles.
+    unsubscribeEvents = client.onSessionEvent(onSessionEvent);
+    wallClock = setTimeout(() => void finish("max_seconds"), opts.maxSeconds * 1000);
+    armCostPoll();
+  };
+
   return {
     runId,
     result,
-    settled: done,
+    // A getter, not a captured value: a resumed run installs a NEW settle
+    // promise, and a caller holding the old one would wait forever.
+    get settled() { return done; },
     say: async (text: string): Promise<string> => {
-      assertUsable("say");
-      followUpsPending += 1;
+      // A settled-but-completed run is resumable — that is what a conversation
+      // spanning separate dispatches needs, and what native SendMessage does.
+      // rearm() throws for every other settled state.
+      const resumed = finishing;
+      if (resumed) rearm();
+      else assertUsable("say");
+
+      // followUpsPending exists so a turn finishing mid-run does not settle
+      // the run out from under a queued follow-up — another agent_end is
+      // still coming for that follow-up's own turn. On a RESUMED run there is
+      // no turn in flight: this follow-up IS the turn, and its agent_end is
+      // the one that must settle. Incrementing here would make the handler
+      // swallow that frame and wait forever for a second one that never comes.
+      if (!resumed) followUpsPending += 1;
       try {
         await client.followUp(text);
       } catch (e) {
-        followUpsPending -= 1;   // never leave a phantom follow-up holding the run open
+        if (!resumed) followUpsPending -= 1;   // never leave a phantom follow-up holding the run open
         throw e;
       }
       // A cap firing while this is outstanding settles the run and releases

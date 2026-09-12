@@ -456,12 +456,15 @@ test("the run's agent is launched in the workdir with the tools, system prompt a
 // Resuming a settled run is deliberately out of scope here (see the runner's
 // own comment on say()): the contract this task fixes is that it FAILS
 // loudly, naming the run, rather than hanging.
-test("say and steer on a settled run fail loudly, naming the run", async () => {
+// steer() interrupts a turn in flight, so it has nothing to interrupt once a
+// run has settled and still fails loudly. say() is different now: resuming a
+// COMPLETED run is supported (see the resume tests below), so only a run that
+// stopped for some other reason refuses it.
+test("steer on a settled run fails loudly, naming the run", async () => {
   const s = setup({});
   const handle = await startRun(s.opts, s.runDir, s.runId);
   try {
     await handle.settled;
-    await expect(handle.say("more")).rejects.toThrow(s.runId);
     await expect(handle.steer("stop")).rejects.toThrow(s.runId);
   } finally {
     await handle.dispose();
@@ -580,3 +583,74 @@ test("stop settles the run as aborted and restores locked paths", async () => {
     await handle.dispose();
   }
 }, 30_000);
+
+// --- Task 8: resuming a settled run -------------------------------------
+
+test("say() resumes a run that completed, and the reply is the new turn's", async () => {
+  const s = setup({ turnCostUsd: 0.01, replies: ["first", "second"] });
+  const h = await startRun(s.opts, s.runDir, s.runId);
+  const first = await h.settled;
+  expect(first.state).toBe("completed");
+  // settled resolves with the SAME object the handle keeps mutating, so a
+  // reference is not a snapshot — read the number out before resuming.
+  const turnsBefore = first.turns;
+
+  const reply = await h.say("carry on");
+  expect(reply).toBe("second");
+  expect(h.result.state).toBe("completed");
+  expect(h.result.turns).toBeGreaterThan(turnsBefore);
+  await h.dispose();
+}, 40_000);
+
+// seconds is the time the AGENT spent working, summed across turns — not wall
+// time including however long the supervisor sat idle between them. So give
+// each turn real duration rather than sleeping between them.
+test("resuming accumulates seconds across turns rather than resetting", async () => {
+  const s = setup({ turnCostUsd: 0.01, replies: ["a", "b"], turnDelayMs: 1100 });
+  const h = await startRun(s.opts, s.runDir, s.runId);
+  const first = await h.settled;
+  const secondsBefore = first.seconds;   // same object as h.result; snapshot it
+  expect(secondsBefore).toBeGreaterThanOrEqual(1);
+  await h.say("again");
+  expect(h.result.seconds).toBeGreaterThanOrEqual(secondsBefore + 1);
+  await h.dispose();
+}, 40_000);
+
+test("say() refuses on a capped run, naming the reason", async () => {
+  const s = setup({ turnCostUsd: 5.0 }, { maxUsd: 1.0 });
+  const h = await startRun(s.opts, s.runDir, s.runId);
+  const r = await h.settled;
+  expect(r.stopped_because).toBe("max_usd");
+  await expect(h.say("more")).rejects.toThrow(/max_usd/);
+  await h.dispose();
+}, 40_000);
+
+test("say() refuses after dispose()", async () => {
+  const s = setup({ turnCostUsd: 0.01 });
+  const h = await startRun(s.opts, s.runDir, s.runId);
+  await h.settled;
+  await h.dispose();
+  await expect(h.say("more")).rejects.toThrow(/dispose/);
+}, 40_000);
+
+test("a resumed run that breaches a cap settles capped, not completed", async () => {
+  const s = setup({ turnCostUsd: 0.6 }, { maxUsd: 1.0 });
+  const h = await startRun(s.opts, s.runDir, s.runId);
+  await h.settled;                       // 0.6 < 1.0, completes
+  await h.say("again").catch(() => {});  // cumulative 1.2 >= 1.0
+  expect(h.result.stopped_because).toBe("max_usd");
+  await h.dispose();
+}, 40_000);
+
+// An ABORTED run isolates the state guard: unlike a capped one, its cost is
+// nowhere near max_usd, so breach() would let it through. Only the
+// stopped_because check refuses it.
+test("say() refuses on an aborted run, naming the reason", async () => {
+  const s = setup({ turnCostUsd: 0.01, turnDelayMs: 3000 });
+  const h = await startRun(s.opts, s.runDir, s.runId);
+  await h.stop();
+  await h.settled;
+  expect(h.result.stopped_because).toBe("aborted");
+  await expect(h.say("more")).rejects.toThrow(/aborted/);
+  await h.dispose();
+}, 40_000);

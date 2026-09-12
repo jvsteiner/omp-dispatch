@@ -628,31 +628,111 @@ git commit -m "fix(runner): let a dispatched agent use omp's own skills, rules a
 
 ### Task 6: Agent definitions — the drop-in core
 
-**Files:** Create `src/agentdef.ts`; Test: `test/agentdef.test.ts`
+**This is the task that makes the plugin drop-in.** It reads the **same**
+`.claude/agents/*.md` files native subagents use, so an existing workflow carries
+over with nothing ported.
+
+**Files:**
+- Create: `src/agentdef.ts`
+- Test: `test/agentdef.test.ts`
 
 **Interfaces:**
 ```ts
 export interface AgentDef {
-  name: string; description: string; systemPrompt: string;
-  ompTools: string[]; droppedTools: string[];
-  maxTurns?: number; model?: string; source: string;
+  name: string;
+  description: string;
+  systemPrompt: string;      // the markdown body
+  ompTools: string[];         // translated, after disallowedTools subtraction
+  droppedTools: string[];     // Claude tools with no omp equivalent
+  maxTurns?: number;
+  model?: string;
+  source: string;             // absolute path, for error messages
 }
-export const TOOL_MAP: Record<string, string>;
-export function translateTools(tools: string[], disallowed: string[]): { ompTools: string[]; dropped: string[] };
+export const TOOL_MAP: Readonly<Record<string, string>>;
+export function translateTools(
+  tools: string[],
+  disallowed: string[],
+): { ompTools: string[]; dropped: string[] };
 export function parseAgentDef(text: string, source: string): AgentDef;
 export function discoverAgentDefs(cwd: string, home: string): Map<string, AgentDef>;
 ```
 
-`TOOL_MAP` (verified against both formats): `Read→read`, `Write→write`, `Edit→edit`, `Bash→bash`, `Grep→grep`, `Glob→glob`, `WebSearch→web_search`, `WebFetch→read` (omp's `read` takes URLs), `NotebookEdit→notebook`, `Agent→task`, `TodoWrite→todo`.
+**The two formats, verified on this machine.** Same shape, different vocabularies:
 
-- [ ] **Step 1:** failing tests, including:
-  - a real definition from `~/.claude/agents/` parses (`tools: Read, Grep, Glob` → `["read","grep","glob"]`)
-  - `disallowedTools` subtracts
-  - `tools: []` yields no tools, not all tools
-  - `Skill` and an MCP tool name land in `dropped`, not silently vanish
-  - project `./.claude/agents/` shadows user `~/.claude/agents/` by name
-  - `maxTurns` and `model` are carried through
-- [ ] **Step 2:** run, FAIL. **Step 3:** implement. **Step 4:** run, PASS. **Step 5:** commit.
+```yaml
+# Claude Code — ~/.claude/agents/a2a-answer-t4.md
+name: a2a-answer-t4
+description: ...
+tools: Read, Grep, Glob                      # comma list, capitalised
+disallowedTools: Bash, Edit, Write, Agent    # subtracted from the allowlist
+maxTurns: 12
+```
+
+`model:` also appears in some definitions. `tools: []` means **no tools**, not all
+tools — do not treat an empty list as "unset".
+
+**`TOOL_MAP`, verified against omp's own tool list:**
+
+| Claude | omp | note |
+|---|---|---|
+| `Read` | `read` | |
+| `Write` | `write` | |
+| `Edit` | `edit` | |
+| `Bash` | `bash` | |
+| `Grep` | `grep` | |
+| `Glob` | `glob` | |
+| `WebSearch` | `web_search` | |
+| `WebFetch` | `read` | omp's `read` takes URLs |
+| `NotebookEdit` | `notebook` | |
+| `Agent` | `task` | omp's own subagents |
+| `TodoWrite` | `todo` | |
+
+Anything else — `Skill`, `ToolSearch`, `SendMessage`, any `mcp__*` tool — has no omp
+equivalent and goes into `droppedTools`. **Never silently discard one.** Task 7 turns
+a non-empty `droppedTools` into a refusal; this task's job is to report it faithfully.
+
+Note `WebFetch` and `Read` both map to `read`: the result must be de-duplicated, and a
+definition allowing both must not produce `read,read`.
+
+**Discovery order:** project `./.claude/agents/` first, then user `~/.claude/agents/`.
+A project definition **shadows** a user one of the same name. A malformed file must
+not take down discovery of the rest — skip it, and make the skip visible in the
+returned map or an accompanying error list, never silent.
+
+- [ ] **Step 1: Write the failing tests**
+
+```ts
+test("parses a real definition from ~/.claude/agents", () => {});        // use a fixture copied from a real one
+test("tools: Read, Grep, Glob becomes read, grep, glob", () => {});
+test("disallowedTools subtracts from the allowlist", () => {});
+test("tools: [] yields NO tools, not all tools", () => {});
+test("Skill and an mcp__ tool land in droppedTools, not silently dropped", () => {});
+test("WebFetch and Read together produce a single read, not a duplicate", () => {});
+test("maxTurns and model are carried through", () => {});
+test("the body becomes systemPrompt, front matter excluded", () => {});
+test("a project definition shadows a user one of the same name", () => {});
+test("a malformed file is skipped without killing discovery of the rest", () => {});
+test("every error names the file it came from", () => {});
+```
+
+For the first test, **copy a real definition into a fixture** rather than reading the
+user's live `~/.claude/agents` — a test that depends on the developer's machine is not
+a test.
+
+- [ ] **Step 2: Run — expect FAIL**
+- [ ] **Step 3: Implement `src/agentdef.ts`**
+
+Reuse the front-matter splitter approach from `src/taskfile.ts` if it fits, but note
+Claude's format uses comma-separated inline lists where `taskfile.ts` uses brackets.
+Do not add a YAML dependency.
+
+- [ ] **Step 4: Run — expect PASS**
+- [ ] **Step 5: Run the whole suite, then commit**
+
+```bash
+git add src/agentdef.ts test/agentdef.test.ts test/fixtures
+git commit -m "feat(agentdef): read and translate Claude Code agent definitions"
+```
 
 ---
 

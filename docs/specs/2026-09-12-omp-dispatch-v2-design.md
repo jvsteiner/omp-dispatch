@@ -175,6 +175,12 @@ Resolution order, highest precedence first:
 1. **An explicit `model` argument to `omp_agent`.** Used verbatim. Any model in
    omp's catalogue — `deepseek/deepseek-v4-pro`, `zai/glm-4.7`, an ollama model,
    anything.
+
+   **The tool's own description must say this.** If the schema only mentions
+   tiers, the caller never learns it may pass a real model id, and the most
+   direct form of control in the design becomes invisible. The `model` parameter
+   is documented as: *a tier name from your config, or any omp model id —
+   run `omp_models` to see what is available.*
 2. **`model:` in the agent definition.** If it names a tier (`haiku`, `sonnet`,
    `opus`) it resolves through the map below. If it names anything else it is
    treated as an omp model id and used verbatim. So an agent definition can pin

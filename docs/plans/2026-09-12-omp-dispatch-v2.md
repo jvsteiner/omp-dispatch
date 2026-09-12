@@ -474,7 +474,7 @@ export async function startRun(opts: RunOptions, runDir: string, runId: string):
 
 **Files:** Modify `src/mcp/server.ts`; Test: `test/omp-agent.test.ts`
 
-`omp_agent(description, prompt, agent_type?, model?, name?, isolation?, workdir?)` → the agent's final report as text, plus a compact footer: turns, cost, tool calls, files changed, stop reason.
+`omp_agent(description, prompt, subagent_type?, model?, name?, isolation?, workdir?)` → the agent's final report as text, plus a compact footer: turns, cost, tool calls, files changed, stop reason.
 
 - [ ] **Step 1:** failing tests — a dispatch against `test/fake-omp.ts` returns the fake's reply; a cap breach is reported in the footer, not thrown; two concurrent dispatches get distinct names; a duplicate explicit `name` is rejected naming the clash.
 - [ ] **Step 2:** run, expect FAIL
@@ -519,7 +519,7 @@ export function discoverAgentDefs(cwd: string, home: string): Map<string, AgentD
 
 **The refusal rule (spec §12.2):** if a definition asks for a tool that cannot be translated, `omp_agent` **fails and names the tools**. No weakened run, no silent fallback to a native subagent. An agent quietly missing the tool it was written around produces confident wrong work.
 
-- [ ] **Step 1:** failing tests — `agent_type` loads the definition and applies tools, system prompt, `maxTurns` and model; an unknown `agent_type` errors listing the available names; a definition needing `Skill` is refused with `Skill` in the message; an explicit `model` argument beats the definition's.
+- [ ] **Step 1:** failing tests — `subagent_type` loads the definition and applies tools, system prompt, `maxTurns` and model; an unknown `subagent_type` errors listing the available names; a definition needing `Skill` is refused with `Skill` in the message; an explicit `model` argument beats the definition's.
 - [ ] **Step 2–5:** run FAIL, implement, run PASS, commit.
 
 ---

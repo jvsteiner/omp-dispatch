@@ -314,10 +314,26 @@ Three things this cannot do, stated plainly so the skill can route around them.
 1. **No MCP servers, no skills, no Claude-native tools inside a dispatched
    agent.** That absence *is* the 43,000-token saving. A task that needs them
    must use a native subagent. This is the one real dividing line.
-2. **No background dispatch with automatic notification.** An MCP server cannot
-   push a wake-up to Claude. `omp_agent` blocks; a long run is polled with
-   `omp_task_output`. Native `run_in_background` remains better for hours-long
-   work.
+2. ~~**No background dispatch with automatic notification.**~~ **Struck — this
+   gap does not exist.** Verified against Claude Code's own docs: since v2.1.212
+   the host **auto-backgrounds** a main-conversation MCP tool call still running
+   after `CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS` (default 2 minutes). Claude gets a
+   task id immediately, carries on, and the result arrives later as a
+   notification. Calls made from *inside* a subagent are exempt and genuinely
+   block.
+
+   That is native `run_in_background` parity for free, from the host, and it
+   behaves correctly in both contexts — exactly as native `Agent` does. We build
+   nothing.
+
+   The timeouts that do apply, so they are not rediscovered later:
+   `MCP_TOOL_TIMEOUT` is the per-call wall clock and defaults to ~28 hours (not
+   the SDK's 60 seconds — Claude Code overrides it); `MCP_TIMEOUT` is 30 seconds
+   and governs *server startup* only; a separate idle timeout (30 minutes for
+   stdio) aborts a call that sends nothing, and **progress notifications reset
+   that idle clock** though they do not extend the wall clock. So `omp_agent`
+   sends progress during a run, and the plugin sets an explicit per-server
+   `timeout` sized to worst-case rather than relying on the 28-hour default.
 3. **Model behaviour differs.** A DeepSeek or GLM subagent is not a Sonnet
    subagent. Agent definitions written against Claude's instruction-following
    may need their prompts tightened. The `maxTurns` cap matters more, not less.

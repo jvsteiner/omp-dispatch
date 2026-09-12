@@ -20,6 +20,6 @@ export function countTurn(s: CapState, frame: { isTerminal?: boolean }): boolean
 export function breach(s: CapState, c: Caps, now = Date.now()): StoppedBecause | null {
   if (s.costUsd >= c.maxUsd) return "max_usd";
   if (s.turns >= c.maxTurns) return "max_turns";
-  if ((now - s.startedAt) / 1000 > c.maxSeconds) return "max_seconds";
+  if ((now - s.startedAt) / 1000 >= c.maxSeconds) return "max_seconds";
   return null;
 }

@@ -83,6 +83,8 @@ for await (const line of console) {
   }
   const ok = (data?: unknown) =>
     out({ id: cmd.id, type: "response", command: cmd.type, success: true, data });
+  const fail = (error: string) =>
+    out({ id: cmd.id, type: "response", command: cmd.type, success: false, error });
 
   switch (cmd.type) {
     case "negotiate_protocol": ok({ protocolVersion: cmd.protocolVersion }); break;
@@ -109,6 +111,8 @@ for await (const line of console) {
       ok();
       out({ type: "agent_end", messages: [], isTerminal: true });
       break;
-    default: ok();
+    default:
+      console.error(`fake-omp: unimplemented command "${cmd.type}"`);
+      fail(`unimplemented command: ${cmd.type}`);
   }
 }

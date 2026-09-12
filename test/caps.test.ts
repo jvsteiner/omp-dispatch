@@ -41,6 +41,11 @@ test("time cap breaches after the limit", () => {
   expect(breach(s, CAPS, 100_001)).toBe("max_seconds");
 });
 
+test("time cap breaches at exactly the limit - must not be permissive at the boundary", () => {
+  const s = newCapState(0);
+  expect(breach(s, CAPS, 100_000)).toBe("max_seconds");
+});
+
 test("budget is reported before turns when both breach", () => {
   const s = newCapState(0); s.turns = 9; s.costUsd = 9;
   expect(breach(s, CAPS, 0)).toBe("max_usd");   // money is the one that hurts

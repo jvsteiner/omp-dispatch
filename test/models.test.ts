@@ -42,3 +42,8 @@ test("a later config file overrides an earlier one, key by key", () => {
 test("a missing config file is not an error", () => {
   expect(loadTierConfig(["/nope/nothing.json"]).tiers.opus).toBe("zai/glm-5.3");
 });
+
+test("an empty or whitespace-only request falls through to the default tier, not a literal empty model id", () => {
+  expect(resolveModel("", DEFAULT_TIERS)).toBe("deepseek/deepseek-flash");
+  expect(resolveModel("   ", DEFAULT_TIERS)).toBe("deepseek/deepseek-flash");
+});

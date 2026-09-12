@@ -38,9 +38,13 @@ export function loadTierConfig(paths: string[]): TierConfig {
 
 /**
  * Precedence: an explicit non-tier string is a model id and is used verbatim;
- * a tier name resolves through the map; nothing resolves the default tier.
+ * a tier name resolves through the map; nothing (or blank) resolves the
+ * default tier. Tier values are model ids and are looked up once — a tier
+ * value that happens to name another tier is not chased further, it is
+ * returned as a literal (would-be) model id.
  */
 export function resolveModel(requested: string | undefined, cfg: TierConfig): string {
-  const key = requested ?? cfg.default;
+  const trimmed = requested?.trim();
+  const key = trimmed ? trimmed : cfg.default;
   return cfg.tiers[key] ?? key;
 }

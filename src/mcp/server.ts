@@ -6,7 +6,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { loadProviderKeys } from "../env.ts";
 import { loadTierConfig, resolveModel } from "../models.ts";
 import { startRun } from "../runner.ts";
-import { newRunId, createRunDir } from "../rundir.ts";
+import { newRunId, createRunDir, pruneRuns } from "../rundir.ts";
 import { createRegistry, uniqueName, type RunRegistry } from "./runs.ts";
 import { discoverAgentDefs, type AgentDef } from "../agentdef.ts";
 import { createWorktree, type Worktree } from "../worktree.ts";
@@ -492,6 +492,20 @@ export function createServer(opts: CreateServerOptions = {}): McpServer {
  * exists to close.
  */
 export async function runStdioServer(opts: CreateServerOptions = {}): Promise<void> {
+  // Run state lives outside the user's repositories and nothing else removes
+  // it, so it would otherwise grow without limit — a single run costs about
+  // 400KB, almost all of it the raw RPC frame log. Pruned once at startup,
+  // best-effort: a directory that cannot be removed must not stop the server.
+  try {
+    const { removed, freedBytes } = pruneRuns();
+    if (removed > 0) {
+      process.stderr.write(
+        `omp-dispatch: pruned ${removed} old run${removed === 1 ? "" : "s"} ` +
+        `(${(freedBytes / 1_048_576).toFixed(1)} MB)\n`,
+      );
+    }
+  } catch { /* never fail startup over housekeeping */ }
+
   const registry = createRegistry();
   const server = createServer({ ...opts, registry });
 

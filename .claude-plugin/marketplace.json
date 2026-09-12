@@ -2,12 +2,14 @@
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "omp-dispatch",
   "description": "Cheap subagents. Claude supervises, omp executes.",
-  "owner": { "name": "Jamie Steiner" },
+  "owner": {
+    "name": "Jamie Steiner"
+  },
   "plugins": [
     {
       "name": "omp-dispatch",
       "description": "Drop-in replacement for native Claude subagents, running on omp.",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "source": "./",
       "category": "development"
     }

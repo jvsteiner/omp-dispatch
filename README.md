@@ -115,6 +115,22 @@ A cap firing is a result, not an error: the run returns its report with
 is cleaned up afterwards; one the agent left work in is kept and its path
 reported.
 
+## Where run state lives, and how it is cleaned
+
+Each run writes a directory — its prompt, a progress log, the raw RPC frames
+and a `result.json`. **None of it goes in your repository.** It lives under
+`~/.omp-dispatch/runs/<project>-<hash>/`, grouped per project, the way omp
+keeps its own sessions under `~/.omp/agent/sessions/`. Nothing to gitignore.
+
+A run costs roughly 400KB, almost all of it the raw frame log — invaluable
+when a run misbehaves, read almost never. So the server prunes on startup:
+
+- anything older than **7 days**
+- anything beyond the most recent **50 runs per project**
+
+It says so on stderr when it removes something. Deleting the whole directory by
+hand is safe at any time; nothing depends on it after a run has settled.
+
 ## Verifying a run
 
 `files_changed` is computed from git, never from the agent's account of itself.

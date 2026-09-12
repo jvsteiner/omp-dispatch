@@ -1,8 +1,10 @@
 import {
   mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, appendFileSync, renameSync,
-  statSync,
+  statSync, rmSync,
 } from "node:fs";
 import { join } from "node:path";
+import { homedir } from "node:os";
+import { createHash } from "node:crypto";
 
 export type RunState = "running" | "asking" | "completed" | "capped" | "aborted" | "error";
 export type StoppedBecause =
@@ -34,7 +36,25 @@ export function newRunId(): string {
   return `${t}-${(counter++).toString(36).padStart(6, "0")}${Math.random().toString(36).slice(2, 6)}`;
 }
 
-export const runsRoot = (workdir: string) => join(workdir, ".omp-dispatch", "runs");
+/**
+ * Run state lives OUTSIDE the repository being worked in.
+ *
+ * Writing it into the workdir meant every project a dispatch touched grew a
+ * new untracked directory needing its own .gitignore entry — and `.omp/` is
+ * not ignored either, so nesting under omp's own directory would only have
+ * renamed the problem. omp keeps its sessions under ~/.omp/agent/sessions for
+ * the same reason: a run is not project content.
+ *
+ * The workdir is slugged into the path so runs stay grouped by project and
+ * remain findable by eye, and hashed so two projects with the same basename
+ * cannot collide.
+ */
+export function runsRoot(workdir: string): string {
+  const base = workdir.replace(/\/+$/, "").split("/").pop() || "root";
+  const slug = base.replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 40);
+  const hash = createHash("sha256").update(workdir).digest("hex").slice(0, 8);
+  return join(homedir(), ".omp-dispatch", "runs", `${slug}-${hash}`);
+}
 export const runDirFor = (workdir: string, runId: string) => join(runsRoot(workdir), runId);
 
 export function createRunDir(workdir: string, runId: string): string {
@@ -109,4 +129,82 @@ export function appendProgress(runDir: string, line: string): void {
   const startedAt = statSync(runDir).birthtimeMs;
   const secs = Math.round((Date.now() - startedAt) / 1000);
   appendFileSync(join(runDir, "progress.log"), `[${String(secs).padStart(4)}s] ${line}\n`);
+}
+
+/**
+ * How long a finished run's directory is kept, and how many are kept per
+ * project regardless of age. Both bounds matter: the age rule alone lets a
+ * heavy day fill a disk, and the count rule alone keeps ancient runs around on
+ * a project touched once a month.
+ *
+ * A run costs roughly 400KB, almost all of it events.jsonl — the raw RPC frame
+ * log, which is invaluable when a run misbehaves and read almost never.
+ */
+const KEEP_DAYS = 7;
+const KEEP_PER_PROJECT = 50;
+
+/**
+ * Delete run directories that are past either bound. Called once when the MCP
+ * server starts, so state cannot grow without limit across sessions.
+ *
+ * Best-effort by design: a directory that cannot be read or removed is skipped
+ * rather than failing the server's startup. Returns what it removed so a caller
+ * can report it.
+ */
+export function pruneRuns(
+  root = join(homedir(), ".omp-dispatch", "runs"),
+  now = Date.now(),
+): { removed: number; freedBytes: number } {
+  let removed = 0;
+  let freedBytes = 0;
+  if (!existsSync(root)) return { removed, freedBytes };
+
+  const cutoff = now - KEEP_DAYS * 24 * 60 * 60 * 1000;
+  let projects: string[];
+  try {
+    projects = readdirSync(root);
+  } catch {
+    return { removed, freedBytes };
+  }
+
+  for (const project of projects) {
+    const dir = join(root, project);
+    let runs: string[];
+    try {
+      runs = readdirSync(dir).sort().reverse();   // run ids sort chronologically
+    } catch {
+      continue;
+    }
+    runs.forEach((runId, index) => {
+      const path = join(dir, runId);
+      let tooOld = false;
+      try {
+        // mtime, not birthtime: it measures age since the run last wrote
+        // anything, which is the thing that matters, and unlike birthtime it
+        // can be set in a test — an age rule nothing can exercise is an age
+        // rule nobody knows works.
+        tooOld = statSync(path).mtimeMs < cutoff;
+      } catch {
+        return;
+      }
+      if (!tooOld && index < KEEP_PER_PROJECT) return;
+      try {
+        freedBytes += dirSize(path);
+        rmSync(path, { recursive: true, force: true });
+        removed += 1;
+      } catch { /* skip anything we cannot remove */ }
+    });
+  }
+  return { removed, freedBytes };
+}
+
+function dirSize(path: string): number {
+  let total = 0;
+  try {
+    for (const entry of readdirSync(path, { withFileTypes: true })) {
+      const child = join(path, entry.name);
+      total += entry.isDirectory() ? dirSize(child) : statSync(child).size;
+    }
+  } catch { /* a file that vanished mid-walk is not worth failing over */ }
+  return total;
 }

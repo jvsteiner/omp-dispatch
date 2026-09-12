@@ -82,3 +82,18 @@ test("the README documents adding the marketplace before installing", () => {
   const installAt = r.indexOf("plugin install");
   expect(addAt).toBeLessThan(installAt);   // order matters; install alone fails
 });
+
+test("plugin and marketplace manifests agree on the version", () => {
+  const p = JSON.parse(readFileSync(join(root, ".claude-plugin/plugin.json"), "utf8"));
+  const m = JSON.parse(readFileSync(join(root, ".claude-plugin/marketplace.json"), "utf8"));
+  const entry = m.plugins.find((x: any) => x.name === "omp-dispatch");
+  // A marketplace install resolves the version from the marketplace entry, so
+  // a drift here means users install something other than what was released.
+  expect(entry.version).toBe(p.version);
+});
+
+test("the licence is MIT and the file is present", () => {
+  const p = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  expect(p.license).toBe("MIT");
+  expect(readFileSync(join(root, "LICENSE"), "utf8")).toContain("MIT License");
+});

@@ -1,10 +1,12 @@
 import { test, expect } from "bun:test";
-import { mkdtempSync, writeFileSync, existsSync, readFileSync } from "node:fs";
+import {
+  mkdtempSync, writeFileSync, existsSync, readFileSync, readdirSync, mkdirSync, utimesSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   newRunId, createRunDir, writeResult, readResult, emptyResult,
-  listRuns, isAlive, appendProgress, runDirFor,
+  listRuns, isAlive, appendProgress, runDirFor, runsRoot, pruneRuns,
 } from "../src/rundir.ts";
 
 const wd = () => mkdtempSync(join(tmpdir(), "omp-run-"));
@@ -115,4 +117,110 @@ test("elapsed time reflects the run directory's age, not the first call", async 
   const log = readFileSync(join(dir, "progress.log"), "utf8");
   const elapsed = Number(/\[\s*(\d+)s\]/.exec(log)![1]);
   expect(elapsed).toBeGreaterThanOrEqual(1);
+});
+
+// --- run state must not land in the user's repository ---------------------
+
+test("runsRoot is outside the workdir entirely", () => {
+  const workdir = "/Users/someone/Code/their-project";
+  const root = runsRoot(workdir);
+  expect(root.startsWith(workdir)).toBe(false);
+  expect(root).toContain(".omp-dispatch");
+});
+
+test("runs are grouped under a readable slug of the project", () => {
+  expect(runsRoot("/a/b/their-project")).toContain("their-project-");
+});
+
+test("two projects with the same basename do not collide", () => {
+  expect(runsRoot("/one/shared-name")).not.toBe(runsRoot("/two/shared-name"));
+});
+
+test("the same workdir always maps to the same root", () => {
+  expect(runsRoot("/a/b/proj")).toBe(runsRoot("/a/b/proj"));
+});
+
+test("a workdir with awkward characters still yields a usable path", () => {
+  const root = runsRoot("/a/b/my project (v2)!");
+  expect(root).not.toContain(" ");
+  expect(root).not.toContain("(");
+});
+
+test("creating a run directory leaves the workdir untouched", () => {
+  const w = mkdtempSync(join(tmpdir(), "omp-clean-"));
+  createRunDir(w, newRunId());
+  expect(readdirSync(w)).toEqual([]);
+});
+
+// --- pruning: run state must not grow without limit ------------------------
+
+function agedRun(root: string, project: string, runId: string, ageDays: number): string {
+  const dir = join(root, project, runId);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "events.jsonl"), "x".repeat(1024));
+  const when = new Date(Date.now() - ageDays * 86_400_000);
+  utimesSync(dir, when, when);
+  return dir;
+}
+
+test("pruning removes nothing when there is nothing to remove", () => {
+  const root = mkdtempSync(join(tmpdir(), "omp-prune-"));
+  expect(pruneRuns(root).removed).toBe(0);
+});
+
+test("pruning a root that does not exist is not an error", () => {
+  expect(pruneRuns(join(tmpdir(), "omp-prune-absent-" + Math.random())).removed).toBe(0);
+});
+
+test("a recent run is kept", () => {
+  const root = mkdtempSync(join(tmpdir(), "omp-prune-"));
+  const dir = agedRun(root, "proj", "20260912T000000Z-aaa", 0);
+  pruneRuns(root);
+  expect(existsSync(dir)).toBe(true);
+});
+
+test("runs beyond the per-project count are removed, newest kept", () => {
+  const root = mkdtempSync(join(tmpdir(), "omp-prune-"));
+  const dirs: string[] = [];
+  for (let i = 0; i < 55; i++) {
+    dirs.push(agedRun(root, "proj", `2026091${String(i).padStart(6, "0")}Z-x`, 0));
+  }
+  const { removed } = pruneRuns(root);
+  expect(removed).toBe(5);
+  expect(existsSync(dirs[dirs.length - 1]!)).toBe(true);   // newest survives
+  expect(existsSync(dirs[0]!)).toBe(false);                 // oldest goes
+});
+
+test("pruning reports how much it freed", () => {
+  const root = mkdtempSync(join(tmpdir(), "omp-prune-"));
+  for (let i = 0; i < 52; i++) {
+    agedRun(root, "proj", `2026091${String(i).padStart(6, "0")}Z-x`, 0);
+  }
+  expect(pruneRuns(root).freedBytes).toBeGreaterThan(1000);
+});
+
+test("one project's runs do not count against another's", () => {
+  const root = mkdtempSync(join(tmpdir(), "omp-prune-"));
+  const a = agedRun(root, "alpha", "20260912T000000Z-a", 0);
+  const b = agedRun(root, "beta", "20260912T000000Z-b", 0);
+  pruneRuns(root);
+  expect(existsSync(a)).toBe(true);
+  expect(existsSync(b)).toBe(true);
+});
+
+test("a run older than the age limit is removed even when the count is fine", () => {
+  const root = mkdtempSync(join(tmpdir(), "omp-prune-"));
+  const old = agedRun(root, "proj", "20260101T000000Z-old", 30);
+  const fresh = agedRun(root, "proj", "20260912T000000Z-new", 0);
+  const { removed } = pruneRuns(root);
+  expect(removed).toBe(1);
+  expect(existsSync(old)).toBe(false);
+  expect(existsSync(fresh)).toBe(true);
+});
+
+test("a run just inside the age limit survives", () => {
+  const root = mkdtempSync(join(tmpdir(), "omp-prune-"));
+  const dir = agedRun(root, "proj", "20260910T000000Z-edge", 6);
+  pruneRuns(root);
+  expect(existsSync(dir)).toBe(true);
 });

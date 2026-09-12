@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { mkdtempSync, existsSync, readdirSync } from "node:fs";
+import { mkdtempSync, existsSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildOmpArgs, startRun, type RunOptions } from "../src/runner.ts";
@@ -38,25 +38,20 @@ test("--no-lsp and --no-pty are still passed", () => {
 // without an empty CLAUDE_CONFIG_DIR a dispatched agent would inherit the
 // HOST's Claude MCP servers, which is the one thing --no-skills etc. were
 // never actually paying for. This must survive the flag-removal refactor
-// untouched. Bun.spawn is wrapped (and always delegated to, and restored in
-// finally) rather than editing test/fake-omp.ts, which this task does not
-// touch: the fake has no way to report its own env back to the test.
+// untouched. Uses the same FAKE_OMP_DUMP mechanism as runner.test.ts's own
+// "launched ... with the tools, system prompt and max-time" test (extended
+// here to also report CLAUDE_CONFIG_DIR — see test/fake-omp.ts and the
+// task-5 report's disclosure) rather than intercepting Bun.spawn, so the
+// test observes the real env the child received instead of a patched global.
 test("CLAUDE_CONFIG_DIR still points at an empty directory", async () => {
-  const workdir = mkdtempSync(join(tmpdir(), "omp-cfgdir-"));
-  const runId = newRunId();
-  const runDir = createRunDir(workdir, runId);
+  const dumpDir = mkdtempSync(join(tmpdir(), "omp-cfgdir-dump-"));
+  const dump = join(dumpDir, "argv.json");
+  process.env.FAKE_OMP_DUMP = dump;
   process.env.FAKE_OMP_SCRIPT = JSON.stringify({});
-
-  let capturedEnv: Record<string, string> | undefined;
-  const realSpawn = Bun.spawn;
-  // @ts-expect-error narrow monkeypatch, scoped to this test and always
-  // delegating to the real spawn — restored in `finally` below.
-  Bun.spawn = (argv: unknown, options: any) => {
-    if (options?.cwd === workdir) capturedEnv = options.env;
-    return (realSpawn as any)(argv, options);
-  };
-
   try {
+    const workdir = mkdtempSync(join(tmpdir(), "omp-cfgdir-"));
+    const runId = newRunId();
+    const runDir = createRunDir(workdir, runId);
     const opts: RunOptions = {
       prompt: "do it", model: "fake/fake-1", workdir, tools: "read",
       maxTurns: 120, maxUsd: 1.0, maxSeconds: 300,
@@ -68,12 +63,12 @@ test("CLAUDE_CONFIG_DIR still points at an empty directory", async () => {
     } finally {
       await handle.dispose();
     }
-  } finally {
-    Bun.spawn = realSpawn;
-  }
 
-  const configDir = capturedEnv?.CLAUDE_CONFIG_DIR;
-  expect(configDir).toBeTruthy();
-  expect(existsSync(configDir!)).toBe(true);
-  expect(readdirSync(configDir!)).toEqual([]);
+    const launched = JSON.parse(readFileSync(dump, "utf8")) as { claudeConfigDir?: string };
+    expect(launched.claudeConfigDir).toBeTruthy();
+    expect(existsSync(launched.claudeConfigDir!)).toBe(true);
+    expect(readdirSync(launched.claudeConfigDir!)).toEqual([]);
+  } finally {
+    delete process.env.FAKE_OMP_DUMP;
+  }
 }, 30_000);

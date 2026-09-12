@@ -9,8 +9,9 @@
  *     turnDelayMs: number, crashAfterPrompt: boolean, readyDelayMs: number,
  *     spawnGrandchild: boolean, statsFailAfter: number | null }
  *
- * FAKE_OMP_DUMP, when set, names a path this process writes its own argv and
- * cwd to, so a test can assert what the host actually launched omp with.
+ * FAKE_OMP_DUMP, when set, names a path this process writes its own argv,
+ * cwd and CLAUDE_CONFIG_DIR to, so a test can assert what the host actually
+ * launched omp with — including env, not just argv.
  */
 import { writeFileSync } from "node:fs";
 
@@ -64,7 +65,9 @@ out({
 // Bun.argv is [bun, thisScript, ...the args the host appended]; the slice is
 // what the host itself chose to pass.
 if (process.env.FAKE_OMP_DUMP) {
-  writeFileSync(process.env.FAKE_OMP_DUMP, JSON.stringify({ argv: Bun.argv.slice(2), cwd: process.cwd() }));
+  writeFileSync(process.env.FAKE_OMP_DUMP, JSON.stringify({
+    argv: Bun.argv.slice(2), cwd: process.cwd(), claudeConfigDir: process.env.CLAUDE_CONFIG_DIR,
+  }));
 }
 
 if (spawnGrandchild) {

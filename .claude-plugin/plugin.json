@@ -2,11 +2,15 @@
   "name": "omp-dispatch",
   "version": "0.1.0",
   "description": "Spawn omp subagents running DeepSeek or GLM in place of native Claude subagents, at a fifth of the token floor. Reads your existing .claude/agents definitions.",
-  "author": { "name": "Jamie Steiner" },
+  "author": {
+    "name": "Jamie Steiner"
+  },
   "mcpServers": {
     "omp-dispatch": {
       "command": "bun",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/src/mcp/server.ts"]
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/bin/server.ts"
+      ]
     }
   },
   "skills": "./skills/"

@@ -32,8 +32,26 @@ Two things native subagents cannot do:
 
 ## Install
 
+This repository is its own marketplace, so adding it comes first — `install`
+alone will not find the plugin.
+
 ```bash
-claude plugin install jvsteiner/omp-dispatch
+claude plugin marketplace add jvsteiner/omp-dispatch
+```
+
+```bash
+claude plugin install omp-dispatch@omp-dispatch
+```
+
+The two names are the same here because the marketplace and the plugin it
+carries share a name. Inside a Claude Code session the same steps are
+`/plugin marketplace add jvsteiner/omp-dispatch` then
+`/plugin install omp-dispatch@omp-dispatch`.
+
+To pick up later changes:
+
+```bash
+claude plugin marketplace update omp-dispatch
 ```
 
 Requires `omp` and `bun` on PATH.

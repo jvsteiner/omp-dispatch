@@ -46,8 +46,29 @@ export interface RunHandle {
   dispose(): Promise<void>;
 }
 
-const OMP_CLI =
-  "/Users/jamie/.bun/install/global/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js";
+/**
+ * How to launch omp. Resolved at call time, never hardcoded: a fixed path to
+ * one machine's bun install is exactly the kind of thing that works for the
+ * author and nobody else.
+ *
+ * `omp` on PATH is the answer whenever it is there, which is the documented
+ * requirement for this plugin. The package-relative fallback covers a checkout
+ * whose dependencies are installed but where the binary was never linked.
+ */
+function ompCommand(): string[] {
+  const onPath = Bun.which("omp");
+  if (onPath) return [onPath];
+  try {
+    return ["bun", Bun.fileURLToPath(
+      import.meta.resolve("@oh-my-pi/pi-coding-agent/dist/cli.js"),
+    )];
+  } catch {
+    throw new Error(
+      "cannot find omp: it is not on PATH and @oh-my-pi/pi-coding-agent is not " +
+      "resolvable from this plugin. Install omp and make sure `omp --version` works.",
+    );
+  }
+}
 
 // A stats call that fails this many times in a row means something is
 // genuinely wrong (not a one-off blip) — see the "budget cap silently
@@ -189,7 +210,7 @@ export async function startRun(
   let killAgentGroup: ((signal: number | NodeJS.Signals) => void) | undefined;
 
   const spawnAgent = async (agentArgs: string[]): Promise<RpcAgentProcess> => {
-    const argv = [...(opts.command ?? ["bun", OMP_CLI]), ...agentArgs];
+    const argv = [...(opts.command ?? ompCommand()), ...agentArgs];
     const proc = Bun.spawn(argv, {
       cwd: opts.workdir,
       env: {

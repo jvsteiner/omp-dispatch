@@ -64,3 +64,21 @@ test("the README exists and explains how to turn this on", () => {
   expect(r).toContain("omp_agent");
   expect(r.toLowerCase()).toContain("claude.md");
 });
+
+test("the manifest launches the dependency-installing launcher, not src directly", () => {
+  const m = JSON.parse(readFileSync(join(root, ".claude-plugin/plugin.json"), "utf8"));
+  const args: string[] = m.mcpServers["omp-dispatch"].args;
+  // A marketplace install clones the repo without node_modules, and bundling
+  // breaks omp's native addon loader — so src/mcp/server.ts cannot be the
+  // entry point or a fresh install serves nothing.
+  expect(args[0]).toContain("bin/server.ts");
+  expect(args[0]).not.toContain("src/mcp/server.ts");
+});
+
+test("the README documents adding the marketplace before installing", () => {
+  const r = readFileSync(join(root, "README.md"), "utf8");
+  expect(r).toContain("plugin marketplace add");
+  const addAt = r.indexOf("plugin marketplace add");
+  const installAt = r.indexOf("plugin install");
+  expect(addAt).toBeLessThan(installAt);   // order matters; install alone fails
+});

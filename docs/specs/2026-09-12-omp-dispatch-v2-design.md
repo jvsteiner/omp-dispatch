@@ -96,6 +96,7 @@ Deliberately shaped to mirror the native tools one-for-one.
 | `TaskStop(id)` | `omp_task_stop(name)` | |
 | — | `omp_steer(to, message)` | **interrupts a running turn.** Native cannot. |
 | — | `omp_answer(name, text)` | answers an `ask_supervisor` question. Native cannot. |
+| — | `omp_models(filter?)` | lists the catalogue, so model choice is informed rather than guessed |
 
 `omp_agent` blocks and returns the report, matching `run_in_background: false`,
 which is the common case. Parallel fan-out works the way it does natively: issue
@@ -162,20 +163,56 @@ omp-only tools an agent definition may opt into by name: `lsp`, `python`,
 
 ## 6. Models, and the environment trap
 
-### Verified model tiers
+### Model choice is the user's, at every level
 
-Both models named in the source brief exist exactly as written:
+**This is a first-class requirement, not a config afterthought.** The point of
+the tool is that the model is a dial you turn based on what actually works. Any
+omp model must be reachable, and every default must be changeable without
+touching code.
 
-| Tier in an agent definition | Resolves to | Why |
-|---|---|---|
-| `haiku` | `deepseek/deepseek-v4-flash` | cheapest, fastest |
-| `sonnet` | `deepseek/deepseek-v4-pro` | the default working tier |
-| `opus` | `zai/glm-5.3` | judgement work |
+Resolution order, highest precedence first:
 
-Configurable, because the right map is a matter of taste and account. Available
-on this machine: `deepseek` has `deepseek-flash`, `deepseek-v4-flash`,
-`deepseek-v4-flash-vision-exp`, `deepseek-v4-pro`. `zai` has sixteen GLM models
-including `glm-5.3` and `glm-5.3-flash`.
+1. **An explicit `model` argument to `omp_agent`.** Used verbatim. Any model in
+   omp's catalogue — `deepseek/deepseek-v4-pro`, `zai/glm-4.7`, an ollama model,
+   anything.
+2. **`model:` in the agent definition.** If it names a tier (`haiku`, `sonnet`,
+   `opus`) it resolves through the map below. If it names anything else it is
+   treated as an omp model id and used verbatim. So an agent definition can pin
+   a specific model, and a definition written for native Claude still works.
+3. **The configured default tier.**
+
+Whatever is resolved goes through the provider guard (§6.2) before a run starts.
+
+### The tier map — defaults, not rules
+
+```json
+{
+  "tiers": {
+    "haiku":  "deepseek/deepseek-flash",
+    "sonnet": "deepseek/deepseek-flash",
+    "opus":   "zai/glm-5.3"
+  },
+  "default": "sonnet"
+}
+```
+
+`deepseek-flash` is deliberate: per DeepSeek's current API documentation it is an
+**alias that tracks their latest flash model**, so this default improves on its
+own rather than pinning to a version that ages. Pin a versioned id
+(`deepseek-v4-flash`) instead when reproducibility matters more than currency.
+
+Read from `~/.omp-dispatch/config.json`, overridden per project by
+`./.omp-dispatch/config.json`. Missing file means the defaults above. Tier names
+beyond the three are allowed — add `cheap`, `thinking`, whatever suits — and an
+agent definition may name any of them.
+
+An `omp_models()` MCP tool lists the catalogue so Claude (and the user) can see
+what is actually available and authenticated, rather than guessing. It is also
+the fastest way to notice the key trap below.
+
+Verified present on this machine: `deepseek` has `deepseek-flash`,
+`deepseek-v4-flash`, `deepseek-v4-flash-vision-exp`, `deepseek-v4-pro`; `zai` has
+sixteen GLM models including `glm-5.3` and `glm-5.3-flash`.
 
 ### The environment trap — this is load-bearing
 
@@ -289,16 +326,26 @@ Three things this cannot do, stated plainly so the skill can route around them.
 | N4 | `ask_supervisor` + `omp_answer`, worktree isolation | an agent parks a question and Claude answers it |
 | N5 | skill, shipped agent definitions, README, CLAUDE.md snippet, paid smoke test | Claude picks omp over a native subagent unprompted |
 
-## 12. Open for review
+## 12. Decisions taken
 
-1. **Tier map defaults.** Proposed above. `opus` → `zai/glm-5.3` is the least
-   confident of the three; it may want `deepseek-v4-pro` instead.
-2. **Should `omp_agent` fall back to a native subagent** when an agent
-   definition requires a tool that cannot be translated, or should it refuse and
-   say so? Refusing is more honest; falling back is more drop-in. This spec
-   assumes **refuse and report**, on the grounds that a silently weakened agent
-   is worse than a clear error.
-3. **Whether to keep `taskfile.ts` at all.** It is built and tested, and the
-   file-driven path is genuinely better for long unattended batches like the
-   wiki ingest that started this. Keeping it costs nothing; the alternative is
-   deleting working code for tidiness.
+All three open questions are settled.
+
+1. **Tier map.** `opus` → `zai/glm-5.3`; `sonnet` and `haiku` both →
+   `deepseek/deepseek-flash`. The two cheap tiers collapsing onto one model is
+   intentional — `deepseek-flash` is an alias tracking DeepSeek's latest flash
+   model, so it stays current on its own. **Every one of these is a default the
+   user changes in config, and any omp model can be named directly at dispatch
+   time or pinned in an agent definition** (§6). Flexibility here is the point
+   of the tool, not a nicety.
+
+2. **An untranslatable tool is a refusal, not a silent downgrade.** If an agent
+   definition asks for a `Skill`, an MCP tool, or anything else omp cannot
+   provide, `omp_agent` **refuses and names what was missing**. It does not run
+   a weakened agent and it does not silently fall back to a native subagent. An
+   agent quietly missing the tool it was written around produces confident
+   wrong work, which is worse than an error the caller can act on.
+
+3. **`taskfile.ts` stays.** It is built and tested, and the file-driven path is
+   genuinely better for long unattended batches — the wiki ingest that started
+   all this is exactly that shape. It is not the main path any more, and it
+   costs nothing to keep.

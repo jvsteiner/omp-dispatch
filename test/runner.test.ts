@@ -223,13 +223,21 @@ test("repeated stats failures end the run as an error instead of running on with
   }
 }, 30_000);
 
-test("an omp child that dies mid-turn ends the run as an error, not a hang", async () => {
+// A dead child is also the natural way to reach finish()'s own final
+// getSessionStats() failing. That catch used to swallow, so the run could
+// report a cost a full turn short with nothing in progress.log saying why.
+//
+// Verified by mutation: deleting the appendProgress from that catch in
+// src/runner.ts makes the last assertion here fail; restoring it passes.
+test("an omp child that dies mid-turn ends the run as an error, not a hang, and says the final stats were lost", async () => {
   process.env.OMP_DISPATCH_POLL_MS = "50";
   try {
     const s = setup({ crashAfterPrompt: true }, { maxSeconds: 300 });
     const r = await runToSettled(s);
     expect(r.state).toBe("error");
     expect(r.stopped_because).toBe("error");
+    const log = readFileSync(join(s.runDir, "progress.log"), "utf8");
+    expect(log).toContain("the final get_session_stats failed");
   } finally {
     delete process.env.OMP_DISPATCH_POLL_MS;
   }
@@ -521,6 +529,35 @@ test("the session-event listener is unsubscribed in teardown, so no frame is rec
   } finally {
     await handle.dispose();
   }
+}, 30_000);
+
+// dispose() racing a settle that is ALREADY in flight: finish() returns
+// immediately in that case, so dispose must wait for the settle itself
+// before killing the tree. Killing it mid-teardown rejects the pending
+// getSessionStats and getLastAssistantText, and the run then reports a cost
+// short by the whole turn — the one number that gates spend.
+//
+// The window is deterministic, not a race: client.stop() rejects every
+// pending request synchronously. turnDelayMs holds the turn open so no
+// agent_end has refreshed the cost yet, and the 15s default poll never
+// fires, so the ONLY read of this turn's cost is the one in finish().
+//
+// Verified by mutation: deleting the `await done;` from dispose() makes both
+// assertions fail — cost_usd 0 instead of 0.07, last_reply null instead of
+// "the whole story"; restoring it passes.
+test("disposing during a settle already in flight still reports the full cost and reply", async () => {
+  const s = setup({ turnCostUsd: 0.07, turnDelayMs: 3000, replies: ["the whole story"] });
+  const handle = await startRun(s.opts, s.runDir, s.runId);
+  await waitForProgress(s.runDir, "START");
+  expect(handle.result.cost_usd).toBe(0);   // nothing has read this turn's cost yet
+
+  const stopping = handle.stop();           // deliberately not awaited: a settle is now in flight
+  await handle.dispose();
+  await stopping;
+
+  const r = await handle.settled;
+  expect(r.cost_usd).toBeCloseTo(0.07, 5);
+  expect(r.last_reply).toBe("the whole story");
 }, 30_000);
 
 // stop() settles the run as aborted without releasing the handle; dispose()

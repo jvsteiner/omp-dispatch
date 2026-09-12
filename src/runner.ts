@@ -304,7 +304,22 @@ export async function startRun(
         result.tool_calls = s.toolCalls;
         result.session_file = s.sessionFile ?? null;
         result.last_reply = await client.getLastAssistantText();
-      } catch { /* the child may already be gone; keep what we have */ }
+      } catch (e) {
+        // Every other failure in this file is logged; this one used to
+        // swallow, which can leave the spend figure a full turn short with
+        // nothing in progress.log to say why. Deliberately NOT escalated:
+        // the run has already settled by the time this runs, and
+        // refreshStats()'s counter is the mechanism for stats failures that
+        // still matter. This is about visibility only.
+        //
+        // Its own try/catch because a throw from appendProgress (an
+        // unwritable progress.log) would otherwise skip unlockPaths below
+        // and leave the workspace read-only — the exact failure the guards
+        // further down exist to prevent.
+        try {
+          appendProgress(runDir, `ERROR the final get_session_stats failed — cost and last reply may be short: ${String(e)}`);
+        } catch { /* best effort */ }
+      }
       // Deliberately NO client.stop() here. Settling a run and releasing the
       // agent are now separate: the MCP server owns the process and calls
       // dispose() when it is done with the handle. stop()ping here would
@@ -547,6 +562,13 @@ export async function startRun(
       // Settle first so the workspace is unlocked and a result is written
       // even when the caller disposes a run that was still going.
       await finish("aborted");
+      // finish() returns IMMEDIATELY when a settle is already in flight, so
+      // awaiting it is not enough on its own: that other teardown may still
+      // be mid-`getSessionStats()`. Killing the tree underneath it makes the
+      // pending request reject, and the run then reports a short cost_usd
+      // and a null last_reply. Wait for the settle itself, not just for the
+      // call that may have been a no-op.
+      await done;
       // client.stop() routes through the kill() above, so it is the group —
       // omp AND its bash tool calls — that gets the SIGTERM, and it waits
       // for the leader to exit. It is a no-op when start() never got as far

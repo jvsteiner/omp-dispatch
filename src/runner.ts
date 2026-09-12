@@ -6,6 +6,7 @@ import {
 } from "./rundir.ts";
 import { newCapState, countTurn, breach, type Caps } from "./caps.ts";
 import { lockPaths, unlockPaths, gitSnapshot, gitChangedSince } from "./preflight.ts";
+import { createAskSupervisor } from "./asktool.ts";
 
 export interface RunOptions {
   prompt: string;
@@ -39,6 +40,8 @@ export interface RunHandle {
   steer(text: string): Promise<void>;
   /** Settle the run as aborted. The agent process stays until dispose(). */
   stop(): Promise<void>;
+  /** Answer a parked ask_supervisor question. False if none is waiting by that id. */
+  answer(askId: string, text: string): boolean;
   /** Settle if still running, then kill omp and everything it spawned. */
   dispose(): Promise<void>;
 }
@@ -155,7 +158,7 @@ export async function startRun(
     };
     return {
       runId, runDir, result, settled: Promise.resolve(result),
-      say: neverStarted, steer: neverStarted,
+      say: neverStarted, steer: neverStarted, answer: () => false,
       stop: async () => {}, dispose: async () => {},
     };
   }
@@ -277,11 +280,23 @@ export async function startRun(
     };
   };
 
+  // The agent's own escape hatch when it is stuck. Its execute() returns a
+  // promise this deliberately leaves unresolved, so omp's turn parks on the
+  // tool call until answer() arrives — no frames, no polling. A native Claude
+  // subagent has no equivalent.
+  const asker = createAskSupervisor(ask => {
+    result.ask = ask;
+    result.state = "asking";
+    writeResult(runDir, result);
+    appendProgress(runDir, `ASK ${ask.question}`);
+  });
+
   const client = new RpcClient({
     spawn: spawnAgent,
     provider, model: id,
     terminationGraceMs: TERMINATION_GRACE_MS,
     args: buildOmpArgs(opts),
+    customTools: [asker.tool as never],
   });
 
   // Re-armable, not one-shot. A completed run can be resumed by say(), and a
@@ -429,6 +444,9 @@ export async function startRun(
       // its caller) hanging forever with result.json stuck at state:"running".
       // Unsubscribe happens here, once, guaranteed — see the comment above
       // for why it isn't earlier.
+      // A parked ask would otherwise hold the agent's turn open forever
+      // against a run that has already settled.
+      asker.cancelAll(`run ${runId} settled (${stopped}) while a question was waiting`);
       unsubscribeEvents?.();
       try { writeResult(runDir, result); } catch { /* best effort */ }
       try {
@@ -675,6 +693,16 @@ export async function startRun(
     },
     stop: async (): Promise<void> => {
       await finish("aborted");
+    },
+    answer: (askId: string, text: string): boolean => {
+      const ok = asker.answer(askId, text);
+      if (ok) {
+        result.ask = null;
+        result.state = "running";
+        writeResult(runDir, result);
+        appendProgress(runDir, `ANSWERED ${askId}`);
+      }
+      return ok;
     },
     dispose: async (): Promise<void> => {
       if (disposed) return;

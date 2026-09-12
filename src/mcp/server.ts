@@ -402,6 +402,36 @@ export function createServer(opts: CreateServerOptions = {}): McpServer {
   );
 
   server.tool(
+    "omp_answer",
+    "Answer a question a run has parked. A dispatched agent that is stuck calls " +
+      "ask_supervisor and waits — omp_list_agents shows it as 'asking', and " +
+      "omp_task_output shows the question. Native subagents cannot ask you anything " +
+      "mid-run, so this has no Agent equivalent. An unanswered question still burns the " +
+      "run's clock, so answer or stop it.",
+    {
+      name: z.string().describe("The run's name."),
+      text: z.string().describe("Your answer. It becomes the tool's return value."),
+    },
+    async ({ name, text }) => {
+      const handle = mustFind(name, "omp_answer");
+      const ask = handle.result.ask;
+      if (!ask) {
+        throw new Error(
+          `omp_answer: run '${name}' is not waiting on a question ` +
+            `(state ${handle.result.state}).`,
+        );
+      }
+      if (!handle.answer(ask.ask_id, text)) {
+        throw new Error(
+          `omp_answer: run '${name}' had question ${ask.ask_id} recorded, but nothing was ` +
+            `waiting on it — it may have been aborted or already answered.`,
+        );
+      }
+      return { content: [{ type: "text", text: `answered '${name}' (${ask.ask_id})` }] };
+    },
+  );
+
+  server.tool(
     "omp_ping",
     "Report the omp version this server will dispatch to. Use to confirm the plugin is wired up.",
     {},

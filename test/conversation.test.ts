@@ -137,3 +137,56 @@ test("steer, task_output and task_stop all error clearly on an unknown name", as
     expect(JSON.stringify(r.content)).toContain("ghost");
   }
 }, 30_000);
+
+// --- ask_supervisor: the agent asks Claude a question ----------------------
+
+test("an agent that asks parks the run, and omp_answer resumes it", async () => {
+  process.env.FAKE_OMP_SCRIPT = JSON.stringify({ askOnTurn: 1, turnCostUsd: 0.01 });
+  const c = await connect();
+  const inFlight = dispatch(c, { name: "asker" });
+
+  // Wait for the run to park on its question rather than finish.
+  let listed = "";
+  for (let i = 0; i < 60 && !listed.includes("asking"); i++) {
+    await Bun.sleep(100);
+    listed = (await call(c, "omp_list_agents")).content[0].text;
+  }
+  expect(listed).toContain("asking");
+
+  const tail = (await call(c, "omp_task_output", { name: "asker" })).content[0].text;
+  expect(tail).toContain("ASK");
+
+  const answered = await call(c, "omp_answer", { name: "asker", text: "the older page wins" });
+  expect(answered.isError).toBeFalsy();
+
+  const settled = await inFlight;
+  expect(settled.content[0].text).toContain("stopped_because=completed");
+}, 40_000);
+
+test("omp_answer on a run that is not asking errors, naming its state", async () => {
+  process.env.FAKE_OMP_SCRIPT = JSON.stringify({});
+  const c = await connect();
+  await dispatch(c, { name: "quiet" });
+  const r = await call(c, "omp_answer", { name: "quiet", text: "hello?" });
+  expect(r.isError).toBe(true);
+  expect(JSON.stringify(r.content)).toContain("not waiting");
+}, 40_000);
+
+// A run stopped while a question is parked must not leave the agent waiting on
+// an answer that can never come — teardown rejects everything outstanding.
+test("stopping a run that is asking settles it rather than hanging", async () => {
+  process.env.FAKE_OMP_SCRIPT = JSON.stringify({ askOnTurn: 1, turnCostUsd: 0.01 });
+  const c = await connect();
+  const inFlight = dispatch(c, { name: "stuck" });
+
+  let listed = "";
+  for (let i = 0; i < 60 && !listed.includes("asking"); i++) {
+    await Bun.sleep(100);
+    listed = (await call(c, "omp_list_agents")).content[0].text;
+  }
+  expect(listed).toContain("asking");
+
+  await call(c, "omp_task_stop", { name: "stuck" });
+  const settled = await inFlight;          // must not hang
+  expect(settled.content[0].text).toContain("aborted");
+}, 40_000);

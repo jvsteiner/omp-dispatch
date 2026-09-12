@@ -1,0 +1,8 @@
+{
+  "name": "omp-dispatch",
+  "private": true,
+  "type": "module",
+  "bin": { "dispatch": "./bin/dispatch" },
+  "dependencies": { "@oh-my-pi/pi-coding-agent": "^18.1.17" },
+  "devDependencies": { "@types/bun": "latest" }
+}

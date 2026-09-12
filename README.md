@@ -122,8 +122,8 @@ and a `result.json`. **None of it goes in your repository.** It lives under
 `~/.omp-dispatch/runs/<project>-<hash>/`, grouped per project, the way omp
 keeps its own sessions under `~/.omp/agent/sessions/`. Nothing to gitignore.
 
-A run costs roughly 400KB, almost all of it the raw frame log — invaluable
-when a run misbehaves, read almost never. So the server prunes on startup:
+A run costs roughly 60KB. The server still prunes on startup, so it cannot
+accumulate across months of use:
 
 - anything older than **7 days**
 - anything beyond the most recent **50 runs per project**

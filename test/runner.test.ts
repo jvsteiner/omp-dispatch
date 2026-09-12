@@ -1,4 +1,4 @@
-import { test, expect } from "bun:test";
+import { test, expect, afterEach } from "bun:test";
 import {
   mkdtempSync, mkdirSync, writeFileSync, readFileSync, statSync, existsSync, rmSync, chmodSync,
   realpathSync,
@@ -111,12 +111,31 @@ test("locked paths are restored even when a cap fires", async () => {
   expect(statSync(join(s.workdir, "raw", "a.txt")).mode & 0o200).not.toBe(0);
 }, 30_000);
 
-test("every frame is written to events.jsonl", async () => {
+// Frame tracing is OFF by default: it was ~85% of a run's disk footprint and
+// nothing ever read it. Both halves matter — that it stays quiet normally, and
+// that it still works when a misbehaving run needs it.
+test("no events.jsonl is written unless tracing is switched on", async () => {
   const s = setup({});
-  await runToSettled(s);
-  const lines = readFileSync(join(s.runDir, "events.jsonl"), "utf8").split("\n").filter(Boolean);
-  expect(lines.length).toBeGreaterThan(0);
-  expect(lines.every(l => JSON.parse(l))).toBe(true);
+  delete process.env.OMP_DISPATCH_TRACE;
+  const h = await startRun(s.opts, s.runDir, s.runId);
+  await h.settled;
+  expect(existsSync(join(s.runDir, "events.jsonl"))).toBe(false);
+  await h.dispose();
+}, 30_000);
+
+test("OMP_DISPATCH_TRACE=1 writes every frame as valid JSON lines", async () => {
+  const s = setup({});
+  process.env.OMP_DISPATCH_TRACE = "1";
+  try {
+    const h = await startRun(s.opts, s.runDir, s.runId);
+    await h.settled;
+    const lines = readFileSync(join(s.runDir, "events.jsonl"), "utf8").split("\n").filter(Boolean);
+    expect(lines.length).toBeGreaterThan(0);
+    expect(lines.every(l => JSON.parse(l))).toBe(true);
+    await h.dispose();
+  } finally {
+    delete process.env.OMP_DISPATCH_TRACE;
+  }
 }, 30_000);
 
 // CARRY-OVER 1. finish() calls client.abort() on a cap breach, and both the
@@ -353,6 +372,8 @@ console.log("RUN_SETTLED");
 // appendFileSync throw propagate uncaught through rpc-client.ts's
 // #handleLine, the run never settles and the test times out.
 test("a handler exception (e.g. events.jsonl becoming unwritable) still reaches teardown", async () => {
+  // These observe frames directly, so tracing must be on — it is off by default.
+  process.env.OMP_DISPATCH_TRACE = "1";
   const s = setup({ toolCallsPerTurn: 0, turnDelayMs: 300 }, { readonly: ["raw"] });
   mkdirSync(join(s.workdir, "raw"));
   writeFileSync(join(s.workdir, "raw", "a.txt"), "a");
@@ -518,6 +539,8 @@ test("a cap firing while a follow-up is outstanding releases it rather than hang
 // this — the append happens before that guard, deliberately, for the audit
 // trail.
 test("the session-event listener is unsubscribed in teardown, so no frame is recorded after the run settles", async () => {
+  // These observe frames directly, so tracing must be on — it is off by default.
+  process.env.OMP_DISPATCH_TRACE = "1";
   const s = setup({ turnDelayMs: 1500 });
   const handle = await startRun(s.opts, s.runDir, s.runId);
   try {
@@ -654,3 +677,6 @@ test("say() refuses on an aborted run, naming the reason", async () => {
   await expect(h.say("more")).rejects.toThrow(/aborted/);
   await h.dispose();
 }, 40_000);
+
+// Tracing is opt-in; a test that switches it on must not leak it to the next.
+afterEach(() => { delete process.env.OMP_DISPATCH_TRACE; });

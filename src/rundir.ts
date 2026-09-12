@@ -137,8 +137,8 @@ export function appendProgress(runDir: string, line: string): void {
  * heavy day fill a disk, and the count rule alone keeps ancient runs around on
  * a project touched once a month.
  *
- * A run costs roughly 400KB, almost all of it events.jsonl — the raw RPC frame
- * log, which is invaluable when a run misbehaves and read almost never.
+ * A run costs roughly 60KB with frame tracing off, which is the default. With
+ * OMP_DISPATCH_TRACE=1 it is nearer 400KB, nearly all of it events.jsonl.
  */
 const KEEP_DAYS = 7;
 const KEEP_PER_PROJECT = 50;

@@ -28,7 +28,7 @@ export interface RunOptions {
 
 export interface RunHandle {
   runId: string;
-  /** Where this run's progress.log, events.jsonl and result.json live. */
+  /** Where this run's progress.log and result.json live. */
   runDir: string;
   /** The live result object — mutated as the run progresses. */
   result: RunResult;
@@ -510,11 +510,27 @@ export async function startRun(
   const onSessionEvent = async (event: any) => {
     // rpc-client.ts:1117 calls this listener bare (no try/catch of its own),
     // so an uncaught throw anywhere below — even a plain fs error appending
-    // to events.jsonl — would become an unhandled rejection: finish() would
+    // to progress.log — would become an unhandled rejection: finish() would
     // never run, and the run would drift to the wall clock with the
     // workspace still locked. Route any such throw to the same teardown.
     try {
+
+      // A raw dump of every RPC frame. OFF unless OMP_DISPATCH_TRACE is set, and
+      // it exists for the tests that need to observe frames directly — that the
+      // handler routes a throw to teardown, and that the listener really is
+      // unsubscribed when a run settles. It is NOT a product feature and is not
+      // documented as one: nothing reads it, it was ~85% of a run's disk
+      // footprint when it was always-on, and telemetry from dispatched agents is
+      // omp's business rather than this plugin's.
+    if (process.env.OMP_DISPATCH_TRACE) {
       appendFileSync(join(runDir, "events.jsonl"), `${JSON.stringify(event)}\n`);
+    }
+
+    const ev = event.assistantMessageEvent;
+      if (ev?.type === "tool_start") {
+        appendProgress(runDir, `${ev.name} ${String(JSON.stringify(ev.input ?? "")).slice(0, 70)}`);
+      }
+
       // Once a settle is under way, no more progress-log lines or turn
       // accounting — a stray frame from the abort finish() just issued
       // (still logged above, for the audit trail) must not log a tool_start
@@ -522,11 +538,6 @@ export async function startRun(
       // This is deliberately checked here, before unsubscribing (which
       // happens later, in finish()'s finally) — see the comment there.
       if (finishing) return;
-
-      const ev = event.assistantMessageEvent;
-      if (ev?.type === "tool_start") {
-        appendProgress(runDir, `${ev.name} ${String(JSON.stringify(ev.input ?? "")).slice(0, 70)}`);
-      }
 
       if (event.type !== "agent_end") return;
       if (!countTurn(state, event)) return;    // isTerminal:false is not a turn

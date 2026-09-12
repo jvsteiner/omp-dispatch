@@ -738,12 +738,66 @@ git commit -m "feat(agentdef): read and translate Claude Code agent definitions"
 
 ### Task 7: Wire agent definitions into `omp_agent`, and refuse on loss
 
-**Files:** Modify `src/mcp/server.ts`; Test: extend `test/omp-agent.test.ts`
+**Files:**
+- Modify: `src/mcp/server.ts`
+- Test: extend `test/omp-agent.test.ts`
 
-**The refusal rule (spec §12.2):** if a definition asks for a tool that cannot be translated, `omp_agent` **fails and names the tools**. No weakened run, no silent fallback to a native subagent. An agent quietly missing the tool it was written around produces confident wrong work.
+**What this task connects.** Task 6 built `src/agentdef.ts` — `discoverAgentDefs(cwd, home)`
+returns `{ defs: Map<string, AgentDef>, errors: string[] }`, and an `AgentDef` carries
+`systemPrompt`, `ompTools`, `droppedTools`, `maxTurns`, `model` and `source`. Task 4 built
+`omp_agent`, which currently ignores `subagent_type`. This task joins them.
 
-- [ ] **Step 1:** failing tests — `subagent_type` loads the definition and applies tools, system prompt, `maxTurns` and model; an unknown `subagent_type` errors listing the available names; a definition needing `Skill` is refused with `Skill` in the message; an explicit `model` argument beats the definition's.
-- [ ] **Step 2–5:** run FAIL, implement, run PASS, commit.
+**The refusal rule — the reason this task exists.** If a definition asks for a tool with no
+omp equivalent — `Skill`, `ToolSearch`, `SendMessage`, any `mcp__*` — `omp_agent`
+**fails and names the missing tools**. It does not run a weakened agent, and it does not
+silently fall back to a native subagent.
+
+An agent quietly missing the tool it was written around produces confident wrong work, which
+is worse than an error the caller can act on. `droppedTools` exists precisely so this can be
+detected; Task 6 was careful never to discard one silently.
+
+**Precedence, highest first:**
+1. An explicit `model` argument to `omp_agent`.
+2. The definition's `model:`.
+3. The configured default tier.
+
+Same for `maxTurns`: an explicit argument, then the definition's, then `AGENT_DEFAULTS`.
+
+**An unknown `subagent_type` is an error listing the available names.** A caller that
+mistypes a name should see what it could have meant, not a generic failure.
+
+- [ ] **Step 1: Write the failing tests**
+
+Extend `test/omp-agent.test.ts`. Use a temporary project tree with its own
+`.claude/agents/` rather than the developer's real one.
+
+```ts
+test("subagent_type applies the definition's tools, system prompt and maxTurns", async () => {});
+test("the definition's model is used when no explicit model is given", async () => {});
+test("an explicit model argument beats the definition's", async () => {});
+test("a definition requiring Skill is refused, and the message names Skill", async () => {});
+test("the refusal names every dropped tool, not just the first", async () => {});
+test("an unknown subagent_type errors listing the available names", async () => {});
+test("no subagent_type still works, using the defaults", async () => {});
+test("a discovery error for one file does not prevent using a valid definition", async () => {});
+```
+
+- [ ] **Step 2: Run — expect FAIL**
+
+- [ ] **Step 3: Implement in `src/mcp/server.ts`**
+
+Resolve the definition before starting a run, so a refusal costs nothing. Pass
+`systemPrompt` through to the runner's `systemPrompt` option and `ompTools` joined by
+commas as `tools`.
+
+- [ ] **Step 4: Run — expect PASS**
+
+- [ ] **Step 5: Run the whole suite, then commit**
+
+```bash
+git add src/mcp/server.ts test/omp-agent.test.ts
+git commit -m "feat(agent): apply .claude/agents definitions, and refuse rather than run weakened"
+```
 
 ---
 

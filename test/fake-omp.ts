@@ -7,7 +7,10 @@
  *   { turnCostUsd, toolCallsPerTurn, replies: string[],
  *     nonTerminalFirst: boolean, askOnTurn: number | null,
  *     turnDelayMs: number, crashAfterPrompt: boolean, readyDelayMs: number,
- *     spawnGrandchild: boolean }
+ *     spawnGrandchild: boolean, statsFailAfter: number | null }
+ *
+ * FAKE_OMP_DUMP, when set, names a path this process writes its own argv and
+ * cwd to, so a test can assert what the host actually launched omp with.
  */
 import { writeFileSync } from "node:fs";
 
@@ -31,6 +34,11 @@ const readyDelayMs: number = script.readyDelayMs ?? 0;
 // frame. Its pid is written to grandchild.pid in this process's cwd (the
 // task workdir) so a test can check it's actually gone after teardown.
 const spawnGrandchild: boolean = script.spawnGrandchild ?? false;
+// Answers this many get_session_stats calls and fails every one after,
+// WITHOUT dying, so a host's consecutive-stats-failure escalation can be
+// exercised on its own. A fake that crashed instead would end the run by the
+// separate child-exited route and prove nothing about the escalation.
+const statsFailAfter: number | null = script.statsFailAfter ?? null;
 
 interface RpcCommand {
   id?: string;
@@ -43,6 +51,7 @@ let turns = 0;
 let cost = 0;
 let toolCalls = 0;
 let hostTools: Array<{ name: string }> = [];
+let statsCalls = 0;
 
 const out = (o: unknown) => process.stdout.write(`${JSON.stringify(o)}\n`);
 
@@ -51,6 +60,12 @@ out({
   type: "ready", protocolVersion: 1, supportedProtocolVersions: [1, 2],
   maxFrameBytes: 1048576, maxReassembledFrameBytes: 67108864,
 });
+
+// Bun.argv is [bun, thisScript, ...the args the host appended]; the slice is
+// what the host itself chose to pass.
+if (process.env.FAKE_OMP_DUMP) {
+  writeFileSync(process.env.FAKE_OMP_DUMP, JSON.stringify({ argv: Bun.argv.slice(2), cwd: process.cwd() }));
+}
 
 if (spawnGrandchild) {
   const gc = Bun.spawn(["sleep", "120"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
@@ -120,7 +135,14 @@ for await (const line of console) {
       ok({ model: { provider: "fake", id: "fake-1" }, isStreaming: false,
            sessionFile: "/tmp/fake-session.jsonl", dumpTools: [] });
       break;
-    case "get_session_stats": ok(stats()); break;
+    case "get_session_stats":
+      statsCalls += 1;
+      if (statsFailAfter !== null && statsCalls > statsFailAfter) {
+        fail(`get_session_stats: scripted failure (call ${statsCalls})`);
+        break;
+      }
+      ok(stats());
+      break;
     case "get_last_assistant_text": ok({ text: replies[Math.min(turns, replies.length) - 1] ?? "done" }); break;
     case "host_tool_result":
       ok();

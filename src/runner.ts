@@ -1,20 +1,44 @@
-import { writeFileSync, appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { RpcClient, type RpcAgentProcess } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
-import type { TaskSpec } from "./taskfile.ts";
 import {
   type RunResult, emptyResult, writeResult, appendProgress,
 } from "./rundir.ts";
 import { newCapState, countTurn, breach, type Caps } from "./caps.ts";
 import { lockPaths, unlockPaths, gitSnapshot, gitChangedSince } from "./preflight.ts";
 
-export interface BrokerOptions {
-  task: TaskSpec;
-  runDir: string;
-  runId: string;
+export interface RunOptions {
+  prompt: string;
+  /** Already resolved by src/models.ts — `provider/id`, or a bare id. */
+  model: string;
+  workdir: string;
+  tools: string;
+  maxTurns: number;
+  maxUsd: number;
+  maxSeconds: number;
+  /** The agent definition's body, appended to omp's own system prompt. */
+  systemPrompt?: string;
+  /** Paths under workdir to make read-only for the run. Off by default. */
+  readonly?: string[];
   /** Override the agent launcher. Tests point this at test/fake-omp.ts. */
   command?: string[];
-  cliPath?: string;
+  env?: Record<string, string>;
+}
+
+export interface RunHandle {
+  runId: string;
+  /** The live result object — mutated as the run progresses. */
+  result: RunResult;
+  /** Resolves once the run has settled, whatever stopped it. */
+  settled: Promise<RunResult>;
+  /** Queue a follow-up; resolves with the reply once the run settles again. */
+  say(text: string): Promise<string>;
+  /** Interrupt the turn in flight with a steering message. */
+  steer(text: string): Promise<void>;
+  /** Settle the run as aborted. The agent process stays until dispose(). */
+  stop(): Promise<void>;
+  /** Settle if still running, then kill omp and everything it spawned. */
+  dispose(): Promise<void>;
 }
 
 const OMP_CLI =
@@ -28,11 +52,33 @@ const OMP_CLI =
 // way it's noticed.
 const MAX_STATS_FAILURES = 3;
 
-export async function runBroker(opts: BrokerOptions): Promise<RunResult> {
-  const { task, runDir, runId } = opts;
+// How long a SIGTERM'd process tree gets before the whole group is
+// escalated to SIGKILL. Passed to RpcClient explicitly: it forwards
+// `terminationGraceMs` straight to our own kill() below, and leaving it
+// undefined would mean SIGTERM only — no escalation at all — for a
+// descendant that ignores it.
+const TERMINATION_GRACE_MS = 2_000;
+
+/**
+ * Start one omp run and hand back a handle to it.
+ *
+ * Unlike v1's broker this is NOT a daemon: the MCP server is the long-lived
+ * process, holds the handle in memory and disposes it on shutdown. There is
+ * no pidfile, no socket and no signal handling here. What v1's four review
+ * rounds did buy — the double-count guard, stats-failure escalation, the
+ * periodic cap poll, protected teardown and killing omp's whole process
+ * tree — is all still here, because every one of them was a defect found
+ * the hard way.
+ */
+export async function startRun(
+  opts: RunOptions,
+  runDir: string,
+  runId: string,
+): Promise<RunHandle> {
   const result = emptyResult(runId);
+  const readonly = opts.readonly ?? [];
   const caps: Caps = {
-    maxTurns: task.maxTurns, maxUsd: task.maxUsd, maxSeconds: task.maxSeconds,
+    maxTurns: opts.maxTurns, maxUsd: opts.maxUsd, maxSeconds: opts.maxSeconds,
   };
   const state = newCapState();
 
@@ -44,7 +90,6 @@ export async function runBroker(opts: BrokerOptions): Promise<RunResult> {
   // var — found the hard way when a "50ms poll" test took 15 real seconds.
   const pollIntervalMs = Number(process.env.OMP_DISPATCH_POLL_MS) || 15_000;
 
-  writeFileSync(join(runDir, "broker.pid"), String(process.pid));
   writeResult(runDir, result);
 
   // An empty CLAUDE_CONFIG_DIR is free insurance; --tools= is what actually
@@ -54,14 +99,14 @@ export async function runBroker(opts: BrokerOptions): Promise<RunResult> {
 
   // Repair a stale lock from a previous kill -9. Best-effort: if the tree is
   // broken badly enough that even the repair-unlock can't walk it, log it
-  // and still try lockPaths below — its own guard (see I5) is what actually
-  // decides whether this run can proceed.
+  // and still try lockPaths below — its own guard is what actually decides
+  // whether this run can proceed.
   try {
-    await unlockPaths(task.workdir, task.readonly);
+    await unlockPaths(opts.workdir, readonly);
   } catch (e) {
     appendProgress(runDir, `ERROR failed to repair a stale lock: ${String(e)}`);
   }
-  const before = await gitSnapshot(task.workdir);
+  const before = await gitSnapshot(opts.workdir);
 
   // lockPaths is inside its own guard: a chmod failure partway through a
   // multi-path readonly list must not leave whatever DID lock stuck with no
@@ -69,21 +114,28 @@ export async function runBroker(opts: BrokerOptions): Promise<RunResult> {
   // client, no child process), so this is a self-contained early return
   // rather than routed through the general finish() below.
   try {
-    await lockPaths(task.workdir, task.readonly);
+    await lockPaths(opts.workdir, readonly);
   } catch (e) {
     appendProgress(runDir, `ERROR failed to lock paths: ${String(e)}`);
-    await unlockPaths(task.workdir, task.readonly).catch(() => {});
-    result.files_changed = await gitChangedSince(task.workdir, before).catch(() => []);
+    await unlockPaths(opts.workdir, readonly).catch(() => {});
+    result.files_changed = await gitChangedSince(opts.workdir, before).catch(() => []);
     result.stopped_because = "error";
     result.state = "error";
     writeResult(runDir, result);
     appendProgress(runDir, "END error — failed to lock paths before starting");
-    return result;
+    const neverStarted = async () => {
+      throw new Error(`run ${runId}: never started — failed to lock paths under ${opts.workdir}`);
+    };
+    return {
+      runId, result, settled: Promise.resolve(result),
+      say: neverStarted, steer: neverStarted,
+      stop: async () => {}, dispose: async () => {},
+    };
   }
 
-  const [provider, id] = task.model.includes("/")
-    ? task.model.split("/") as [string, string]
-    : [undefined, task.model];
+  const [provider, id] = opts.model.includes("/")
+    ? opts.model.split("/") as [string, string]
+    : [undefined, opts.model];
 
   // A custom spawn instead of RpcClientOptions' command/cliPath so this can
   // hold on to the child's own `exited` promise — RpcClient's `#process` is
@@ -95,19 +147,42 @@ export async function runBroker(opts: BrokerOptions): Promise<RunResult> {
   // its own pid). Anything IT spawns without detaching itself again — in
   // particular every bash tool call omp runs — inherits that same pgid.
   // Killing by PID alone (RpcClient's default ptree.spawn-backed transport
-  // uses Process.terminate(), which kills descendants; a bare
-  // `proc.kill()` here would not) only reaches the direct child and leaves
-  // those descendants running against a workspace teardown just unlocked.
+  // uses Process.terminate(), which kills descendants; a bare `proc.kill()`
+  // here would not) only reaches the direct child and leaves those
+  // descendants running against a workspace teardown has finished with.
   // Signaling the negative PID targets the whole group instead.
+  //
+  // This is the one piece of "detached spawn" machinery that stays. It is
+  // not daemon machinery — nothing here detaches the HOST — it is the
+  // mechanism that makes the descendant kill reach omp's bash tool calls.
   let childExited: Promise<number> | undefined;
-  const spawnAgent = (agentArgs: string[]): RpcAgentProcess => {
-    const argv = [...(opts.command ?? ["bun", opts.cliPath ?? OMP_CLI]), ...agentArgs];
+  let killAgentGroup: ((signal: number | NodeJS.Signals) => void) | undefined;
+
+  const spawnAgent = async (agentArgs: string[]): Promise<RpcAgentProcess> => {
+    const argv = [...(opts.command ?? ["bun", OMP_CLI]), ...agentArgs];
     const proc = Bun.spawn(argv, {
-      cwd: task.workdir,
-      env: { ...process.env, CLAUDE_CONFIG_DIR: emptyConfig } as Record<string, string>,
+      cwd: opts.workdir,
+      env: {
+        ...process.env, ...(opts.env ?? {}), CLAUDE_CONFIG_DIR: emptyConfig,
+      } as Record<string, string>,
       stdin: "pipe", stdout: "pipe", stderr: "pipe",
       detached: true,
     });
+
+    const killGroup = (signal: number | NodeJS.Signals) => {
+      try {
+        process.kill(-proc.pid, signal);
+      } catch {
+        // The group may already be empty/gone, or (unexpectedly) killing by
+        // group may not be available — fall back to the direct child so a
+        // real failure here isn't silently swallowed.
+        try { proc.kill(signal); } catch { /* already dead */ }
+      }
+    };
+    // Exposed synchronously, before the pgid probe below ever yields: the
+    // child is physically running the instant Bun.spawn returns, so a
+    // dispose() landing in that gap must still be able to kill it.
+    killAgentGroup = killGroup;
 
     let stderrTail = "";
     const stderrDrained = (async () => {
@@ -134,16 +209,27 @@ export async function runBroker(opts: BrokerOptions): Promise<RunResult> {
     });
     childExited = exited;
 
-    const killGroup = (signal: number | NodeJS.Signals) => {
-      try {
-        process.kill(-proc.pid, signal);
-      } catch {
-        // The group may already be empty/gone, or (unexpectedly) killing by
-        // group may not be available — fall back to the direct child so a
-        // real failure here isn't silently swallowed.
-        try { proc.kill(signal); } catch { /* already dead */ }
-      }
-    };
+    // `detached: true` is only worth anything if it actually took effect. If
+    // some platform or runtime combination silently ignored it, the group
+    // kill above would throw ESRCH, its own catch would quietly fall back to
+    // killing just the direct child, and the descendant-orphaning defect
+    // this file exists to prevent would be back with no error and no failing
+    // test. Confirm the agent really is its own process-group leader, and
+    // refuse to run rather than pretend. A probe that could not RUN (no ps,
+    // or the child already exited) is not evidence of failure and is only
+    // noted — this must not invent a reason to fail a healthy run.
+    const probe = await Bun.$`ps -o pgid= -p ${proc.pid}`.nothrow().quiet();
+    const pgid = Number(probe.stdout.toString().trim());
+    if (probe.exitCode !== 0 || !Number.isFinite(pgid)) {
+      appendProgress(runDir, `NOTE could not verify the agent's process group for pid ${proc.pid}`);
+    } else if (pgid !== proc.pid) {
+      killGroup("SIGKILL");
+      throw new Error(
+        `omp agent pid ${proc.pid} is not its own process-group leader (pgid ${pgid}) — ` +
+        `refusing to start, because teardown would then reach only the direct child and ` +
+        `leave omp's bash tool calls running against ${opts.workdir}`,
+      );
+    }
 
     return {
       stdin: proc.stdin,
@@ -152,9 +238,11 @@ export async function runBroker(opts: BrokerOptions): Promise<RunResult> {
       kill: (signal, graceMs) => {
         killGroup((signal as number | NodeJS.Signals | undefined) ?? "SIGTERM");
         if (graceMs !== undefined && graceMs >= 0) {
-          const escalate = setTimeout(() => {
-            if (proc.exitCode === null) killGroup("SIGKILL");
-          }, graceMs);
+          // Escalate to the whole group, not gated on the leader's own
+          // liveness — the leader can exit from SIGTERM while a descendant
+          // that ignores it survives, and a leader-only check would then
+          // never send the SIGKILL that descendant needs.
+          const escalate = setTimeout(() => killGroup("SIGKILL"), graceMs);
           escalate.unref?.();
         }
       },
@@ -165,46 +253,48 @@ export async function runBroker(opts: BrokerOptions): Promise<RunResult> {
   const client = new RpcClient({
     spawn: spawnAgent,
     provider, model: id,
+    terminationGraceMs: TERMINATION_GRACE_MS,
     args: [
-      `--tools=${task.tools}`,
+      `--tools=${opts.tools}`,
+      ...(opts.systemPrompt ? [`--append-system-prompt=${opts.systemPrompt}`] : []),
       "--no-skills", "--no-rules", "--no-extensions", "--no-lsp", "--no-pty",
-      // Always longer than the broker's own wall clock below, so the broker
-      // always wins that race and reports max_seconds itself instead of the
-      // two racing non-deterministically over which one gets to explain why
-      // the run stopped.
-      `--max-time=${task.maxSeconds + 60}`,
+      // Always longer than our own wall clock below, so this runner always
+      // wins that race and reports max_seconds itself instead of the two
+      // racing non-deterministically over which one gets to explain why the
+      // run stopped.
+      `--max-time=${opts.maxSeconds + 60}`,
     ],
   });
 
   let settled: (r: RunResult) => void;
   const done = new Promise<RunResult>(res => { settled = res; });
   let finishing = false;
+  let disposed = false;
   let statsFailures = 0;
+  // Follow-ups queued by say() that have not yet had their turn. A terminal
+  // agent_end must not settle the run as completed while one is outstanding,
+  // or say() ends the very run it was trying to continue.
+  let followUpsPending = 0;
 
   let unsubscribeEvents: (() => void) | undefined;
   let wallClock: ReturnType<typeof setTimeout> | undefined;
   let costPoll: ReturnType<typeof setInterval> | undefined;
 
-  const onSignal = (sig: string) => {
-    appendProgress(runDir, `SIGNAL ${sig} received — aborting and restoring the workspace`);
-    void finish("aborted");
-  };
-
   const finish = async (stopped: NonNullable<RunResult["stopped_because"]>) => {
     if (finishing) return;
     finishing = true;
-    // The wall clock, poll and signal handlers are stopped immediately —
-    // nothing depends on them firing again. The session-event listener is
-    // deliberately NOT unsubscribed yet (see the finally block): client
-    // .abort() below makes the fake (and real omp) emit its own unsolicited
-    // agent_end, and the handler's own `if (finishing) return` guard —
-    // checked against the flag just set above — is what stops that frame
-    // from being double-counted as a turn. Unsubscribing here instead would
-    // make that guard unreachable and this exact regression untestable.
+    // The wall clock and poll are stopped immediately — nothing depends on
+    // them firing again, and this is their only clearing site, so a second
+    // route to clearing them cannot mask a poll created after teardown. The
+    // session-event listener is deliberately NOT unsubscribed yet (see the
+    // finally block): client.abort() below makes the fake (and real omp)
+    // emit its own unsolicited agent_end, and the handler's own
+    // `if (finishing) return` guard — checked against the flag just set
+    // above — is what stops that frame from being double-counted as a turn.
+    // Unsubscribing here instead would make that guard unreachable and this
+    // exact regression untestable.
     clearTimeout(wallClock);
     clearInterval(costPoll);
-    process.off("SIGINT", onSignal);
-    process.off("SIGTERM", onSignal);
 
     try {
       if (stopped !== "completed") await client.abort().catch(() => {});
@@ -215,7 +305,10 @@ export async function runBroker(opts: BrokerOptions): Promise<RunResult> {
         result.session_file = s.sessionFile ?? null;
         result.last_reply = await client.getLastAssistantText();
       } catch { /* the child may already be gone; keep what we have */ }
-      await client.stop().catch(() => {});
+      // Deliberately NO client.stop() here. Settling a run and releasing the
+      // agent are now separate: the MCP server owns the process and calls
+      // dispose() when it is done with the handle. stop()ping here would
+      // also make stop() and dispose() the same operation.
 
       // From here on nothing may skip settled(result) or leave the workspace
       // locked: unlockPaths and gitChangedSince can both genuinely throw
@@ -224,13 +317,13 @@ export async function runBroker(opts: BrokerOptions): Promise<RunResult> {
       // teardown — and, in the unlock case, leave paths unwritable forever.
       let unlockFailed = false;
       try {
-        await unlockPaths(task.workdir, task.readonly);
+        await unlockPaths(opts.workdir, readonly);
       } catch (e) {
         unlockFailed = true;
         appendProgress(runDir, `ERROR failed to unlock paths — workspace may still be read-only: ${String(e)}`);
       }
       try {
-        result.files_changed = await gitChangedSince(task.workdir, before);
+        result.files_changed = await gitChangedSince(opts.workdir, before);
       } catch (e) {
         appendProgress(runDir, `ERROR failed to compute files_changed: ${String(e)}`);
       }
@@ -249,10 +342,10 @@ export async function runBroker(opts: BrokerOptions): Promise<RunResult> {
         : "capped");
     } finally {
       // settled(result) and a best-effort write/log must happen regardless of
-      // what threw above — an unhandled throw here would leave `done` (and
-      // runBroker's caller) hanging forever with result.json stuck at
-      // state:"running". Unsubscribe happens here, once, guaranteed — see
-      // the comment above for why it isn't earlier.
+      // what threw above — an unhandled throw here would leave `settled` (and
+      // its caller) hanging forever with result.json stuck at state:"running".
+      // Unsubscribe happens here, once, guaranteed — see the comment above
+      // for why it isn't earlier.
       unsubscribeEvents?.();
       try { writeResult(runDir, result); } catch { /* best effort */ }
       try {
@@ -261,9 +354,6 @@ export async function runBroker(opts: BrokerOptions): Promise<RunResult> {
       settled(result);
     }
   };
-
-  process.on("SIGINT", onSignal);
-  process.on("SIGTERM", onSignal);
 
   // Refreshes cost/tool-call numbers from omp's own count — never trust
   // frames for this. Returns false when the read failed, so callers know not
@@ -296,9 +386,9 @@ export async function runBroker(opts: BrokerOptions): Promise<RunResult> {
   }
 
   unsubscribeEvents = client.onSessionEvent(async (event: any) => {
-    // rpc-client.ts calls this listener bare (no try/catch of its own), so
-    // an uncaught throw anywhere below — even a plain fs error appending to
-    // events.jsonl — would become an unhandled rejection: finish() would
+    // rpc-client.ts:1117 calls this listener bare (no try/catch of its own),
+    // so an uncaught throw anywhere below — even a plain fs error appending
+    // to events.jsonl — would become an unhandled rejection: finish() would
     // never run, and the run would drift to the wall clock with the
     // workspace still locked. Route any such throw to the same teardown.
     try {
@@ -327,7 +417,17 @@ export async function runBroker(opts: BrokerOptions): Promise<RunResult> {
       if (!ok) return;
 
       const b = breach(state, caps);
-      await finish(b ?? "completed");
+      if (b) {
+        await finish(b);
+        return;
+      }
+      // A cap always wins over a pending follow-up; short of one, a turn
+      // that a say() is still waiting behind must not settle the run.
+      if (followUpsPending > 0) {
+        followUpsPending -= 1;
+        return;
+      }
+      await finish("completed");
     } catch (e) {
       if (!finishing) {
         appendProgress(runDir, `ERROR the session-event handler threw: ${String(e)}`);
@@ -336,24 +436,23 @@ export async function runBroker(opts: BrokerOptions): Promise<RunResult> {
     }
   });
 
-  wallClock = setTimeout(() => void finish("max_seconds"), task.maxSeconds * 1000);
+  wallClock = setTimeout(() => void finish("max_seconds"), opts.maxSeconds * 1000);
 
   try {
     await client.start();
 
-    // A signal or the wall clock can fire while start() above is still
-    // pending — finish() already ran its cleanup by the time start()
-    // settles, finding costPoll (and everything below) not created yet.
-    // Nothing past this point may still run in that case: creating the poll
-    // anyway would leak an interval nothing will ever clear, calling
-    // getState()/prompt() would restart work on a client finish() is
-    // already tearing down.
+    // The wall clock can fire while start() above is still pending —
+    // finish() has then already run its cleanup by the time start() settles,
+    // finding costPoll (and everything below) not created yet. Nothing past
+    // this point may still run in that case: creating the poll anyway would
+    // leak an interval nothing will ever clear, and calling
+    // getState()/prompt() would restart work on a client finish() has
+    // already torn down.
     if (!finishing) {
       // The real hook for "did the child die unexpectedly": spawnAgent
       // above captured the same `exited` promise a caller-owned process
-      // would have. finish() itself kills the child as part of normal
-      // teardown, but by then `finishing` is already true, so this is a
-      // no-op on the expected path.
+      // would have. dispose() itself kills the child, but by then
+      // `finishing` is already true, so this is a no-op on that path.
       if (childExited) {
         void childExited.then(code => {
           if (finishing) return;
@@ -388,8 +487,8 @@ export async function runBroker(opts: BrokerOptions): Promise<RunResult> {
       result.model = st.model ? { provider: st.model.provider, id: st.model.id } : null;
       result.session_file = st.sessionFile ?? null;
       writeResult(runDir, result);
-      appendProgress(runDir, `START ${task.model}`);
-      await client.prompt(task.body);
+      appendProgress(runDir, `START ${opts.model}`);
+      await client.prompt(opts.prompt);
     }
   } catch (e) {
     if (!finishing) {
@@ -398,5 +497,63 @@ export async function runBroker(opts: BrokerOptions): Promise<RunResult> {
     }
   }
 
-  return done;
+  // Anything that talks to the agent needs the agent to still be there and
+  // the run to still be open. Failing loudly beats the two alternatives:
+  // hanging on a turn that will never come, or answering from a session the
+  // run has already reported on. Resuming a SETTLED run — which is what a
+  // conversation across separate dispatches needs — is deliberately not
+  // implemented here: it turns on decisions this task has no ruling for
+  // (whether a resumed run re-arms the wall clock, how cumulative caps apply
+  // across an idle gap), and guessing at them belongs nowhere near this file.
+  const assertUsable = (what: string) => {
+    if (disposed) {
+      throw new Error(`run ${runId}: ${what}() after dispose() — the omp process is gone`);
+    }
+    if (finishing) {
+      throw new Error(
+        `run ${runId}: ${what}() on a run that has already settled ` +
+        `(${result.stopped_because}) — resuming a settled run is not supported`,
+      );
+    }
+  };
+
+  return {
+    runId,
+    result,
+    settled: done,
+    say: async (text: string): Promise<string> => {
+      assertUsable("say");
+      followUpsPending += 1;
+      try {
+        await client.followUp(text);
+      } catch (e) {
+        followUpsPending -= 1;   // never leave a phantom follow-up holding the run open
+        throw e;
+      }
+      // A cap firing while this is outstanding settles the run and releases
+      // this wait too — no separate waiter to leak.
+      return (await done).last_reply ?? "";
+    },
+    steer: async (text: string): Promise<void> => {
+      assertUsable("steer");
+      await client.steer(text);
+    },
+    stop: async (): Promise<void> => {
+      await finish("aborted");
+    },
+    dispose: async (): Promise<void> => {
+      if (disposed) return;
+      disposed = true;
+      // Settle first so the workspace is unlocked and a result is written
+      // even when the caller disposes a run that was still going.
+      await finish("aborted");
+      // client.stop() routes through the kill() above, so it is the group —
+      // omp AND its bash tool calls — that gets the SIGTERM, and it waits
+      // for the leader to exit. It is a no-op when start() never got as far
+      // as a live process, which is exactly when the explicit kill below is
+      // the only thing that reaps the child.
+      await client.stop().catch(() => {});
+      killAgentGroup?.("SIGKILL");
+    },
+  };
 }

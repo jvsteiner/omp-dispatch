@@ -36,10 +36,8 @@ async function runOmp(args: string[], extraEnv: Record<string, string> = {}): Pr
 
 function pluginVersion(): string {
   try {
-    // The plugin manifest, not package.json: a marketplace install resolves
-    // the version from the manifest, so that is the one clients should be
-    // told about. package.json is kept in step by a packaging test.
-    const manifest = join(dirname(import.meta.path), "..", "..", ".claude-plugin", "plugin.json");
+    // Both host manifests are kept in step with the shared package version.
+    const manifest = join(dirname(import.meta.path), "..", "..", "package.json");
     return JSON.parse(readFileSync(manifest, "utf8")).version ?? "0.0.0";
   } catch {
     return "0.0.0";
@@ -104,6 +102,21 @@ export function createServer(opts: CreateServerOptions = {}): McpServer {
   const registry = opts.registry ?? createRegistry();
   const reserved = new Set<string>();
   const isTaken = (n: string) => registry.has(n) || reserved.has(n);
+  type Reply = { content: Array<{ type: "text"; text: string }>; isError?: boolean };
+  const operations = new Map<string, { done: Promise<Reply>; reply?: Reply }>();
+  // Catch failures even when no client is currently waiting. Keep the reply
+  // (including worktree cleanup/errors) available to later polling calls.
+  const track = (name: string, promise: Promise<Reply>) => {
+    const operation: { done: Promise<Reply>; reply?: Reply } = {
+      done: promise.catch(e => ({
+        isError: true,
+        content: [{ type: "text", text: e instanceof Error ? e.message : String(e) }],
+      })),
+    };
+    operation.done = operation.done.then(reply => { operation.reply = reply; return reply; });
+    operations.set(name, operation);
+    return operation.done;
+  };
 
   // Every successful dispatch's omp process is `detached: true` (see
   // runner.ts) and deliberately outlives the run that started it, so a later
@@ -123,15 +136,15 @@ export function createServer(opts: CreateServerOptions = {}): McpServer {
   server.tool(
     "omp_agent",
     "Spawn an omp subagent (DeepSeek or GLM by default) to run a task end to end, in " +
-      "place of a native Claude subagent, at a fraction of the token cost. Blocks until " +
+      "place of a native subagent. Set run_in_background for asynchronous dispatch. Otherwise blocks until " +
       "the run settles and returns its final report followed by a compact footer. A cap " +
       "breach (max turns or max spend) is reported in that footer, not thrown.",
     {
       description: z.string().describe("A short (3-5 word) description of the task"),
       prompt: z.string().describe("The task for the agent to perform"),
       subagent_type: z.string().optional().describe(
-        "Name of an agent definition in .claude/agents/*.md — the same files native " +
-          "subagents use, read unmodified. Its tools, system prompt, maxTurns and model " +
+        "Name of a Markdown agent definition in .omp-dispatch/agents or .claude/agents " +
+          "under the project or home directory. Its tools, system prompt, maxTurns and model " +
           "are applied. A definition requiring a tool omp has no equivalent for (Skill, " +
           "ToolSearch, an mcp__* tool) is refused rather than run weakened. Omit to run " +
           "with the defaults.",
@@ -152,24 +165,28 @@ export function createServer(opts: CreateServerOptions = {}): McpServer {
         "Absolute path the agent runs in. Defaults to this MCP server process's own " +
           "working directory.",
       ),
+      run_in_background: z.boolean().optional().describe(
+        "Return the run name after startup; collect the report with omp_task_output. Recommended for Codex.",
+      ),
     },
-    async ({ description, prompt, subagent_type, model, name, isolation, workdir }, extra) => {
+    async ({ description, prompt, subagent_type, model, name, isolation, workdir, run_in_background }, extra) => {
       const baseWorkdir = workdir ?? process.cwd();
       let targetWorkdir = baseWorkdir;
 
       // Resolved BEFORE any run starts, so a refusal costs nothing.
       let def: AgentDef | undefined;
       if (subagent_type) {
-        const { defs } = discoverAgentDefs(targetWorkdir, process.env.HOME ?? "");
+        const { defs, errors } = discoverAgentDefs(targetWorkdir, process.env.HOME ?? "");
         def = defs.get(subagent_type);
         if (!def) {
           const available = [...defs.keys()].sort();
           throw new Error(
             `omp_agent: no agent definition named '${subagent_type}' under ` +
-              `${targetWorkdir}/.claude/agents or ~/.claude/agents. ` +
+              `.omp-dispatch/agents or .claude/agents in ${targetWorkdir} or the home directory. ` +
               (available.length
                 ? `Available: ${available.join(", ")}.`
-                : `No definitions were found in either location.`),
+                : `No definitions were found.`) +
+              (errors.length ? ` Parse errors: ${errors.join("; ")}` : ""),
           );
         }
         // An agent quietly missing the tool it was written around produces
@@ -261,7 +278,7 @@ export function createServer(opts: CreateServerOptions = {}): McpServer {
         // Interval read per call, like OMP_DISPATCH_POLL_MS in runner.ts, so
         // a test can shrink it without a module-load-time freeze.
         const progressToken = extra._meta?.progressToken;
-        if (progressToken !== undefined) {
+        if (progressToken !== undefined && !run_in_background) {
           const progressMs = Number(process.env.OMP_DISPATCH_PROGRESS_MS) || 15_000;
           let n = 0;
           progressTimer = setInterval(() => {
@@ -278,47 +295,55 @@ export function createServer(opts: CreateServerOptions = {}): McpServer {
           }, progressMs);
         }
 
-        const result = await handle.settled;
+        const finish = async (): Promise<Reply> => {
+          const result = await handle.settled;
+          let isolationNote = "";
+          if (worktree) {
+            const { removed, path } = await worktree.cleanup();
+            isolationNote = removed
+              ? `\n[omp:${runName}] worktree was clean and has been removed`
+              : `\n[omp:${runName}] worktree kept — the agent left work in ${path}`;
+          }
 
-        // A cap breach (max_turns/max_usd/max_seconds) is a result, not an
-        // exception — the run's own report and footer say so via
-        // stopped_because. Only a failure to start (or a mid-run failure the
-        // runner could not recover from) reaches state "error", and that is
-        // the one case this throws instead of returning a footer.
-        if (result.state === "error") {
-          // Dropped from the registry, so it must be disposed here: Task 3
-          // deliberately leaves a settled run's omp process alive until
-          // dispose(), and any handle dropped without that call leaks it.
-          registry.remove(runName);
-          await handle.dispose();
-          throw new Error(
-            `omp_agent: run '${runName}' (${runId}) did not complete: ` +
-              `${result.stopped_because ?? "error"}. See ${runDir}/progress.log for details.`,
-          );
-        }
+          // A cap breach (max_turns/max_usd/max_seconds) is a result, not an
+          // exception — the run's own report and footer say so via
+          // stopped_because. Only a failure to start (or a mid-run failure the
+          // runner could not recover from) reaches state "error", and that is
+          // the one case this throws instead of returning a footer.
+          if (result.state === "error") {
+            // Failed children need disposal too. Background runs keep their
+            // handle so list/output can still explain what failed.
+            if (!run_in_background) registry.remove(runName);
+            await handle.dispose();
+            throw new Error(
+              `omp_agent: run '${runName}' (${runId}) did not complete: ` +
+              `${result.stopped_because ?? "error"}. See ${runDir}/progress.log for details.${isolationNote}`,
+            );
+          }
 
 
-        // Sourced from RunResult.model, not the resolved request string: it
-        // is filled from the agent's own reported state (runner.ts, via
-        // get_state) and is the one field that can drift from what was
-        // actually asked for.
-        const modelLabel = result.model ? `${result.model.provider}/${result.model.id}` : resolvedModel;
-        const footer =
-          `\n\n---\n[omp:${runName}] model=${modelLabel} turns=${result.turns} ` +
-          `tool_calls=${result.tool_calls} cost_usd=${result.cost_usd.toFixed(4)} ` +
-          `seconds=${result.seconds} stopped_because=${result.stopped_because}`;
+          // Sourced from RunResult.model, not the resolved request string: it
+          // is filled from the agent's own reported state (runner.ts, via
+          // get_state) and is the one field that can drift from what was
+          // actually asked for.
+          const modelLabel = result.model ? `${result.model.provider}/${result.model.id}` : resolvedModel;
+          const footer =
+            `\n\n---\n[omp:${runName}] model=${modelLabel} turns=${result.turns} ` +
+            `tool_calls=${result.tool_calls} cost_usd=${result.cost_usd.toFixed(4)} ` +
+            `seconds=${result.seconds} stopped_because=${result.stopped_because}`;
 
-        let isolationNote = "";
-        if (worktree) {
-          const { removed, path } = await worktree.cleanup();
-          isolationNote = removed
-            ? `\n[omp:${runName}] worktree was clean and has been removed`
-            : `\n[omp:${runName}] worktree kept — the agent left work in ${path}`;
-        }
-
-        return {
-          content: [{ type: "text", text: (result.last_reply ?? "(no reply)") + footer + isolationNote }],
+          return {
+            content: [{ type: "text", text: (result.last_reply ?? "(no reply)") + footer + isolationNote }],
+          };
         };
+        const done = track(runName, finish());
+        if (run_in_background) {
+          return { content: [{ type: "text", text:
+            `Started '${runName}'. Collect with omp_task_output({name: ${JSON.stringify(runName)}, wait_seconds: 25}). ` +
+            `Run directory: ${runDir}`,
+          }] };
+        }
+        return await done;
       } finally {
         clearInterval(progressTimer);
         reserved.delete(runName);
@@ -354,24 +379,34 @@ export function createServer(opts: CreateServerOptions = {}): McpServer {
     {
       to: z.string().describe("The run's name, as returned by omp_agent or omp_list_agents."),
       message: z.string().describe("The follow-up to send."),
+      run_in_background: z.boolean().optional().describe("Return immediately; collect with omp_task_output. Recommended for Codex."),
     },
-    async ({ to, message }) => {
+    async ({ to, message, run_in_background }) => {
       const handle = mustFind(to, "omp_send_message");
-      const reply = await handle.say(message);
-      const r = handle.result;
-      const footer =
-        `\n\n---\n[omp:${to}] turns=${r.turns} tool_calls=${r.tool_calls} ` +
-        `cost_usd=${r.cost_usd.toFixed(4)} seconds=${r.seconds} ` +
-        `stopped_because=${r.stopped_because}`;
-      return { content: [{ type: "text", text: (reply || "(no reply)") + footer }] };
+      if (operations.has(to) && !operations.get(to)!.reply) {
+        throw new Error(`omp_send_message: run '${to}' is still active; use omp_steer or wait for its result.`);
+      }
+      const finish = async (): Promise<Reply> => {
+        const reply = await handle.say(message);
+        const r = handle.result;
+        const footer =
+          `\n\n---\n[omp:${to}] turns=${r.turns} tool_calls=${r.tool_calls} ` +
+          `cost_usd=${r.cost_usd.toFixed(4)} seconds=${r.seconds} ` +
+          `stopped_because=${r.stopped_because}`;
+        return { content: [{ type: "text", text: (reply || "(no reply)") + footer }] };
+      };
+      const done = track(to, finish());
+      if (run_in_background) {
+        return { content: [{ type: "text", text: `Continuing '${to}'. Collect with omp_task_output.` }] };
+      }
+      return await done;
     },
   );
 
   server.tool(
     "omp_steer",
-    "Interrupt the turn a run is in the middle of, with a correction. Native subagents " +
-      "cannot do this — use it when an agent is visibly going the wrong way and you do " +
-      "not want to wait for the turn to finish. Returns as soon as the message is queued.",
+    "Interrupt the turn a run is in the middle of with a correction. Use it when an " +
+      "agent is going the wrong way. Returns as soon as the message is queued.",
     {
       to: z.string().describe("The run's name."),
       message: z.string().describe("The steering message."),
@@ -403,23 +438,37 @@ export function createServer(opts: CreateServerOptions = {}): McpServer {
 
   server.tool(
     "omp_task_output",
-    "Show what a run has been doing — its progress log, newest last. Use it on a run in " +
-      "flight to see where it has got to without interrupting it.",
+    "Show state, pending questions and progress, or the final report for a settled run. " +
+      "Optionally wait up to 30 seconds, below Codex's default MCP timeout.",
     {
       name: z.string().describe("The run's name."),
       lines: z.number().optional().describe("How many trailing lines to show. Default 40."),
+      wait_seconds: z.number().min(0).max(30).optional().describe("Wait for completion up to this many seconds. Default 0."),
     },
-    async ({ name, lines }) => {
+    async ({ name, lines, wait_seconds }) => {
+      const operation = operations.get(name);
+      if (operation?.reply) return operation.reply;
       const handle = mustFind(name, "omp_task_output");
+      if (operation && wait_seconds && handle.result.state !== "asking") {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([operation.done, new Promise<void>(resolve => {
+            timer = setTimeout(resolve, wait_seconds * 1000);
+          })]);
+        } finally { clearTimeout(timer); }
+        if (operation.reply) return operation.reply;
+      }
+      const status = `run '${name}': state=${handle.result.state}` +
+        (handle.result.ask ? ` question=${JSON.stringify(handle.result.ask)}` : "");
       const log = join(handle.runDir, "progress.log");
       let text: string;
       try {
         text = readFileSync(log, "utf8");
       } catch {
-        return { content: [{ type: "text", text: `run '${name}' has produced no progress log yet` }] };
+        return { content: [{ type: "text", text: `${status}\nNo progress log yet.` }] };
       }
       const all = text.split("\n").filter(Boolean);
-      return { content: [{ type: "text", text: all.slice(-(lines ?? 40)).join("\n") }] };
+      return { content: [{ type: "text", text: status + "\n" + all.slice(-(lines ?? 40)).join("\n") }] };
     },
   );
 
@@ -439,8 +488,7 @@ export function createServer(opts: CreateServerOptions = {}): McpServer {
     "omp_answer",
     "Answer a question a run has parked. A dispatched agent that is stuck calls " +
       "ask_supervisor and waits — omp_list_agents shows it as 'asking', and " +
-      "omp_task_output shows the question. Native subagents cannot ask you anything " +
-      "mid-run, so this has no Agent equivalent. An unanswered question still burns the " +
+      "omp_task_output shows the question. An unanswered question still burns the " +
       "run's clock, so answer or stop it.",
     {
       name: z.string().describe("The run's name."),
@@ -481,8 +529,8 @@ export function createServer(opts: CreateServerOptions = {}): McpServer {
   server.tool(
     "omp_models",
     "List omp's model catalogue. Applies provider API keys sourced from the " +
-      "user's shell rc files first, since this server is launched by Claude " +
-      "Code rather than a login shell and would otherwise miss any provider " +
+      "user's shell rc files first, since this server is launched by the host " +
+      "rather than a login shell and would otherwise miss any provider " +
       "whose key lives only in ~/.zshrc, ~/.bashrc or ~/.profile.",
     {},
     async () => {

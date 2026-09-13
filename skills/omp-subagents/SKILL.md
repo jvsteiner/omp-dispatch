@@ -1,89 +1,105 @@
 ---
 name: omp-subagents
-description: Use when delegating work to a subagent - dispatches it to omp running DeepSeek or GLM instead of a native Claude subagent, at roughly a fifth of the token floor, reading the same .claude/agents definitions. Also covers continuing, steering, or answering a question from a dispatched agent.
+description: Delegate work to external omp agents from Codex or Claude Code using configurable models. Use for OMP delegation, or continuing, steering, inspecting and answering dispatched agents.
 ---
 
 # Dispatching subagents to omp
 
-`omp_agent` is a drop-in replacement for the native `Agent` tool. Same
-arguments, same `.claude/agents/*.md` files, a fraction of the cost.
+Use `omp_agent` from the omp-dispatch MCP server to delegate a bounded task.
+Discover the server's tools if they are deferred; host prefixes can vary.
+In Claude Code its full name is typically `mcp__omp-dispatch__omp_agent`.
+In Codex, this is an external MCP workflow: native subagent tools and thread
+IDs do not operate on OMP runs.
 
+**Use a native subagent when** the task needs host-only tools, skills or
+conversation context that you cannot include in an OMP brief. OMP uses its own
+rules, tools, skills, credentials and permissions. It does not inherit the
+host's sandbox or approval settings. Do not use it to bypass a denied action.
+
+When delegation is appropriate and authorized, prefer OMP for independent
+exploration, review and implementation tasks. Keep responsibility for checking
+the result in the supervising host.
+
+## Start and collect
+
+In Codex, use background mode for both dispatches and follow-ups. Calls return
+after startup instead of waiting through the whole task. Always pass the
+absolute project `workdir`; an MCP server's own working directory may differ.
+
+```json
+{
+  "description": "Trace retry handling",
+  "prompt": "Read the retry implementation in src/. Explain retry conditions with path:line citations. Do not edit files.",
+  "workdir": "/absolute/path/to/project",
+  "name": "retry-review",
+  "run_in_background": true
+}
 ```
-Agent({ description, prompt, subagent_type: "reviewer", model: "sonnet" })
-mcp__omp-dispatch__omp_agent({ description, prompt, subagent_type: "reviewer", model: "sonnet" })
-```
 
-`model: "sonnet"` resolves through a tier map to an omp model. You can also
-pass any omp model id directly — `deepseek/deepseek-v4-pro`, `zai/glm-5.3` —
-and `omp_models` lists what is actually available.
+The returned name identifies the run for all subsequent calls. Supply a
+self-contained brief: goal, relevant paths, constraints, permitted changes,
+acceptance checks and expected output. Conversation history is not forwarded.
+For concurrent writers, assign disjoint files or use `isolation: "worktree"`.
+Worktrees start from committed HEAD; account for required local changes
+before relying on them in an isolated run.
 
-## Decide first: omp or native?
+Collect with `omp_task_output({"name":"retry-review","wait_seconds":25})`.
+It returns status and progress while active, a question when asking, and the
+final report when finished. Waits are capped at 30 seconds to fit Codex's MCP
+timeout. Do useful independent work between polls; otherwise use a bounded
+wait. Continue collecting until the requested work has settled.
 
-**Use a native subagent when** the task needs a Claude Code MCP server or skill
-that you have not also given omp. That is the only real dividing line, and it
-is a narrow one — a dispatched agent has omp's own skills, rules, extensions
-and MCP servers, just not the host's.
+`omp_agent` and `omp_send_message` remain blocking when `run_in_background`
+is omitted, for existing Claude Code workflows.
 
-**Use omp for everything else.** It is not only for bulk work. Implementers,
-reviewers, explorers, one-off questions — all of it.
+## Tools
 
-If you are unsure, dispatch to omp. A refusal is cheap and explicit: an agent
-definition asking for a tool omp cannot provide fails immediately, naming the
-tool, rather than running weakened.
-
-## The tools
-
-| | |
+| Tool | Purpose |
 |---|---|
-| `omp_agent` | dispatch a subagent, get its report — like `Agent` |
-| `omp_send_message` | continue a run, keeping its context — like `SendMessage` |
-| `omp_list_agents` | what has run, and what is running now |
-| `omp_task_output` | what a run is doing, without interrupting it |
-| `omp_task_stop` | stop a run |
-| `omp_steer` | **interrupt the turn in flight** — native cannot do this |
-| `omp_answer` | answer a question a run asked you — native cannot do this |
-| `omp_models` | what models are available |
+| `omp_agent` | Start work; use `run_in_background: true` in Codex |
+| `omp_send_message` | Continue a completed run using `to`, `message`, and background mode |
+| `omp_list_agents` | List this server session's runs, states, turns and costs |
+| `omp_task_output` | Collect report, progress or pending question; optional `wait_seconds` |
+| `omp_task_stop` | Stop a run by `name` |
+| `omp_steer` | Correct an active run using `to` and `message` |
+| `omp_answer` | Answer a supervisor question using `name` and `text` |
+| `omp_models` | Inspect the configured OMP model catalogue |
+| `omp_ping` | Check the OMP executable/version |
 
-## Two things native subagents cannot do
+When a run is `asking`, read the question and answer within your authority, or
+ask the user for missing information. An unanswered question consumes the time
+cap. Stop the run if it is no longer needed.
 
-**Steering.** If an agent is visibly going the wrong way, `omp_steer` interrupts
-the turn it is in the middle of. You do not have to wait for it to finish being
-wrong.
+## Models and definitions
 
-**Being asked.** A dispatched agent that is stuck calls `ask_supervisor` and
-parks. `omp_list_agents` shows it as `asking`, `omp_task_output` shows the
-question, and `omp_answer` resumes it. Use this instead of letting an agent
-guess — a guess costs a whole run.
+`model` accepts a configured tier (`haiku`, `sonnet`, `opus`, or a custom name)
+or an OMP model ID. These tier names are aliases, not requests for Claude.
+Omit it to use the definition's model or the configured default.
+Use `omp_models` to check what is available; don't guess provider IDs.
 
-An unanswered question still burns the run's clock. Answer it or stop it.
+Optional `subagent_type` names a Markdown definition found in this order:
 
-## Isolation
+1. `<workdir>/.omp-dispatch/agents/`
+2. `<workdir>/.claude/agents/`
+3. `~/.omp-dispatch/agents/`
+4. `~/.claude/agents/`
 
-`isolation: "worktree"` gives the run its own git checkout, so it can write
-freely without touching your working tree. An unchanged worktree is cleaned up;
-one the agent left work in is kept and its path reported.
+Definitions use the existing Claude-compatible front matter (`tools`,
+`disallowedTools`, `maxTurns`, `model`) and Markdown prompt body. Templates
+ship under `agents/` in this plugin; they must be copied to a discovery
+directory before being named. Native Codex `.codex/agents/*.toml` files are
+not imported. Unsupported required tools are refused explicitly.
 
-Default is `none`, matching native.
+## Check results
 
-## Reading the result
+Read `stopped_because`: `completed` is completion; caps, aborts and errors mean
+the work may be partial. Read the diff and run relevant checks before accepting
+an agent's claims. Git-derived `files_changed` is in the run's `result.json`.
 
-Every dispatch returns the agent's report plus a footer:
+A dirty worktree is kept and its path reported. A clean worktree is removed
+after the initial run, so start a new isolated run instead of resuming one
+whose worktree was removed. Work is not merged automatically.
 
-```
-[omp:reviewer-1] model=deepseek/deepseek-flash turns=14 tool_calls=31
-cost_usd=0.0412 seconds=88 stopped_because=completed
-```
-
-`stopped_because` is the field that matters. `completed` means it finished.
-`max_turns`, `max_usd` or `max_seconds` mean a cap fired — the work is partial
-and the footer is telling you so, not erroring.
-
-Caps exist because omp has none of its own. A confused agent will otherwise run
-until the clock stops it.
-
-## Verifying the work
-
-Read the diff, not the agent's summary of the diff. `files_changed` in the run
-directory comes from git, never from the agent's own account of itself.
-
-A cheap model will tell you confidently that it did something. Check.
+Runs and continuation handles belong to the current MCP server process.
+Disconnecting stops its child processes; saved artifacts remain under
+`~/.omp-dispatch/runs/`, but cannot be resumed by name after a restart.

@@ -1,10 +1,14 @@
 # omp-dispatch
 
-Spawn subagents that run on [omp](https://github.com/oh-my-pi) — DeepSeek, GLM,
-whatever you point it at — instead of on Claude. Same tool shape as the native
-`Agent`, same `.claude/agents/*.md` files, a fraction of the token floor.
+Delegate work from **Claude Code or Codex** to subagents running on
+[omp](https://github.com/oh-my-pi), using your configured providers and models.
+Claude Code keeps the familiar `Agent` argument shape and `.claude/agents/*.md`
+definitions. Codex uses the same MCP server with background dispatch and polling.
 
-Measured startup cost for an empty task:
+**Codex:** see [installation and workflow](docs/codex.md).
+
+Previously measured startup cost for an empty task (Claude Code comparison;
+Codex startup savings have not been measured):
 
 | | tokens |
 |---|---|
@@ -24,13 +28,16 @@ Your existing agent definitions are read unmodified. `tools:`,
 a tool omp has no equivalent for — `Skill`, an `mcp__*` tool — is **refused**,
 naming the tool, rather than quietly running weakened.
 
-Two things native subagents cannot do:
+Run controls:
 
 - **`omp_steer`** interrupts the turn an agent is in the middle of.
 - **`ask_supervisor`** lets a stuck agent ask *you* a question and wait.
   `omp_answer` resumes it.
 
 ## Install
+
+These commands install into Claude Code. For Codex, use the
+[Codex setup guide](docs/codex.md).
 
 This repository is its own marketplace, so adding it comes first — `install`
 alone will not find the plugin.
@@ -55,6 +62,22 @@ claude plugin marketplace update omp-dispatch
 ```
 
 Requires `omp` and `bun` on PATH.
+
+## Repository layout
+
+| Path | Purpose |
+|---|---|
+| `.claude-plugin/` | Claude manifest and marketplace (also readable by Codex) |
+| `.codex-plugin/plugin.json`, `.mcp.json` | Codex manifest and MCP launch configuration |
+| `src/`, `bin/server.ts` | Shared runner, lifecycle and MCP server |
+| `skills/omp-subagents/` | Delegation workflow for both hosts |
+| `agents/` | Optional Markdown role templates for either host |
+| `docs/codex.md` | Codex installation, limitations and examples |
+
+Both hosts discover role definitions in project `.omp-dispatch/agents/`,
+project `.claude/agents/`, user `~/.omp-dispatch/agents/`, then user
+`~/.claude/agents/`, in that order. Copy a shipped template into one of those
+directories before passing its name as `subagent_type`.
 
 ## Choosing models
 
@@ -138,9 +161,10 @@ Read the diff, not the summary.
 
 ## What it does not do
 
-A dispatched agent has **omp's** skills, rules, extensions and MCP servers — not
-Claude Code's. That absence is the saving. A task that genuinely needs a Claude
-Code MCP server should use a native subagent.
+A dispatched agent has **omp's** skills, rules, extensions and MCP servers.
+Host-only capabilities and conversation history are not forwarded. A task
+that needs a Claude Code or Codex capability unavailable in OMP should use a
+native subagent. OMP runs do not inherit the host's sandbox or approval policy.
 
 ## Licence
 

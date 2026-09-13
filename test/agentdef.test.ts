@@ -162,3 +162,21 @@ test("each call returns a fresh map, not a shared instance", () => {
   first.defs.delete("a");
   expect(discoverAgentDefs(cwd, home).defs.has("a")).toBe(true);
 });
+
+test("neutral roles take precedence within scope, while project roles beat home roles", () => {
+  const { cwd, home } = tree();
+  for (const dir of [cwd, home]) {
+    mkdirSync(join(dir, ".omp-dispatch", "agents"), { recursive: true });
+  }
+  writeFileSync(join(cwd, ".omp-dispatch", "agents", "r.md"), def("r", "Grep"));
+  writeFileSync(join(cwd, ".claude", "agents", "r.md"), def("r", "Read"));
+  writeFileSync(join(home, ".omp-dispatch", "agents", "r.md"), def("r", "Bash"));
+  writeFileSync(join(home, ".omp-dispatch", "agents", "u.md"), def("u", "Glob"));
+  writeFileSync(join(home, ".claude", "agents", "u.md"), def("u", "Bash"));
+  writeFileSync(join(cwd, ".claude", "agents", "p.md"), def("p", "Read"));
+  writeFileSync(join(home, ".omp-dispatch", "agents", "p.md"), def("p", "Bash"));
+  const { defs } = discoverAgentDefs(cwd, home);
+  expect(defs.get("r")!.ompTools).toEqual(["grep"]);
+  expect(defs.get("u")!.ompTools).toEqual(["glob"]);
+  expect(defs.get("p")!.ompTools).toEqual(["read"]);
+});

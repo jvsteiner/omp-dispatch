@@ -156,7 +156,9 @@ function loadDir(dir: string, into: Map<string, AgentDef>, errors: string[]): vo
 export function discoverAgentDefs(cwd: string, home: string): Discovered {
   const defs = new Map<string, AgentDef>();
   const errors: string[] = [];
+  loadDir(join(cwd, ".omp-dispatch", "agents"), defs, errors);
   loadDir(join(cwd, ".claude", "agents"), defs, errors);
+  loadDir(join(home, ".omp-dispatch", "agents"), defs, errors);
   loadDir(join(home, ".claude", "agents"), defs, errors);
   return { defs, errors };
 }

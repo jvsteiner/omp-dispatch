@@ -1,0 +1,19 @@
+{
+  "name": "omp-dispatch",
+  "version": "0.1.2",
+  "description": "Delegate Codex work to external omp agents using configurable providers and models.",
+  "author": { "name": "Jamie Steiner" },
+  "repository": "https://github.com/jvsteiner/omp-dispatch",
+  "license": "MIT",
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "OMP Dispatch",
+    "shortDescription": "External omp agents for Codex",
+    "longDescription": "Delegate work to omp with model tiers, background runs, follow-ups, steering, supervisor questions and worktree isolation.",
+    "developerName": "Jamie Steiner",
+    "category": "Productivity",
+    "capabilities": ["Read", "Write"],
+    "defaultPrompt": ["Use omp to explore this project and report findings."]
+  }
+}

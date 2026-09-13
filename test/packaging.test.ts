@@ -5,6 +5,18 @@ import { parseAgentDef } from "../src/agentdef.ts";
 
 const root = join(import.meta.dir, "..");
 
+test("Codex and Claude packages share the version, skill and dependency-installing launcher", () => {
+  const codex = JSON.parse(readFileSync(join(root, ".codex-plugin/plugin.json"), "utf8"));
+  const claude = JSON.parse(readFileSync(join(root, ".claude-plugin/plugin.json"), "utf8"));
+  expect(codex.name).toBe(claude.name);
+  expect(codex.version).toBe(claude.version);
+  expect(codex.skills).toBe(claude.skills);
+  const mcp = JSON.parse(readFileSync(join(root, codex.mcpServers), "utf8"));
+  expect(mcp.mcpServers["omp-dispatch"]).toEqual(claude.mcpServers["omp-dispatch"]);
+  const launcher = mcp.mcpServers["omp-dispatch"].args[0].replace("${CLAUDE_PLUGIN_ROOT}", root);
+  expect(existsSync(launcher)).toBe(true);
+});
+
 test("the plugin manifest declares the MCP server and the skills directory", () => {
   const m = JSON.parse(readFileSync(join(root, ".claude-plugin/plugin.json"), "utf8"));
   expect(m.name).toBe("omp-dispatch");

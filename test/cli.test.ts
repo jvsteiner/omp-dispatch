@@ -1,5 +1,5 @@
 import { test, expect, beforeAll, afterAll } from "bun:test";
-import { mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runCli } from "../src/cli.ts";
@@ -37,6 +37,18 @@ async function cli(argv: string[]) {
   return { code, out: chunks.join(""), err: errs.join("") };
 }
 
+async function cliWithStdin(stdinText: string, argv: string[]) {
+  const chunks: string[] = [];
+  const errs: string[] = [];
+  const code = await runCli(argv, {
+    command: FAKE_COMMAND,
+    out: s => chunks.push(s),
+    err: s => errs.push(s),
+    stdin: () => Promise.resolve(stdinText),
+  });
+  return { code, out: chunks.join(""), err: errs.join("") };
+}
+
 test("start dispatches, reports, persists the name, and removes its monitor marker", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "omp-cli-work-"));
   const r = await cli([
@@ -58,7 +70,48 @@ test("start dispatches, reports, persists the name, and removes its monitor mark
 test("start refuses a missing prompt instead of dispatching anything", async () => {
   const r = await cli(["start", "--workdir", mkdtempSync(join(tmpdir(), "omp-cli-work-"))]);
   expect(r.code).toBe(1);
-  expect(r.err).toContain("start requires --prompt");
+  expect(r.err).toContain("start requires a prompt: --prompt <text>, --prompt-file <path>, or --prompt - for stdin");
+});
+
+test("start reads the brief from --prompt-file", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "omp-cli-work-"));
+  const brief = join(workdir, "brief.md");
+  writeFileSync(brief, "A brief with 'quotes', \"double quotes\" and `backticks`.\n");
+  const r = await cli(["start", "--prompt-file", brief, "--name", "filebrief", "--workdir", workdir]);
+  expect(r.code).toBe(0);
+  expect(r.out).toContain("stopped_because=completed");
+  expect(r.err).toContain("START name=filebrief");
+});
+
+test("start reads the brief from stdin via --prompt -", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "omp-cli-work-"));
+  const r = await cliWithStdin("piped brief body", [
+    "start", "--prompt", "-", "--name", "stdinbrief", "--workdir", workdir,
+  ]);
+  expect(r.code).toBe(0);
+  expect(r.out).toContain("stopped_because=completed");
+});
+
+test("start refuses two prompt sources rather than guessing", async () => {
+  const r = await cli(["start", "--prompt", "x", "--prompt-file", "y",
+    "--workdir", mkdtempSync(join(tmpdir(), "omp-cli-work-"))]);
+  expect(r.code).toBe(1);
+  expect(r.err).toContain("pass only one prompt source");
+});
+
+test("start refuses an empty brief", async () => {
+  const r = await cliWithStdin("   \n", [
+    "start", "--prompt", "-", "--workdir", mkdtempSync(join(tmpdir(), "omp-cli-work-")),
+  ]);
+  expect(r.code).toBe(1);
+  expect(r.err).toContain("was empty");
+});
+
+test("start names the file it cannot read", async () => {
+  const r = await cli(["start", "--prompt-file", "/no/such/brief.md",
+    "--workdir", mkdtempSync(join(tmpdir(), "omp-cli-work-"))]);
+  expect(r.code).toBe(1);
+  expect(r.err).toContain("cannot read --prompt-file /no/such/brief.md");
 });
 
 test("start refuses an unknown agent definition with the shared refusal text", async () => {
@@ -124,8 +177,29 @@ test("usage totals the runs on disk for the workdir", async () => {
 
 test("doctor runs from the CLI and reports the same checks as the tool", async () => {
   const r = await cli(["doctor", "--workdir", mkdtempSync(join(tmpdir(), "omp-cli-work-"))]);
-  expect(r.out).toContain("doctor: 6/6 checks passed");
+  expect(r.out).toContain("doctor: 7/7 checks passed");
   expect(r.code).toBe(0);
+});
+
+test("doctor fails loudly when an omp database is locked", async () => {
+  const { Database } = await import("bun:sqlite");
+  const home = mkdtempSync(join(tmpdir(), "omp-cli-lockhome-"));
+  mkdirSync(join(home, ".omp", "agent"), { recursive: true });
+  mkdirSync(join(home, ".omp"), { recursive: true });
+  const holder = new Database(join(home, ".omp", "stats.db"));
+  holder.exec("CREATE TABLE IF NOT EXISTS t(x); BEGIN IMMEDIATE");
+  const originalHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    const r = await cli(["doctor", "--workdir", "/tmp"]);
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("FAIL databases");
+    expect(r.out).toContain("database is locked");
+  } finally {
+    process.env.HOME = originalHome;
+    holder.exec("ROLLBACK");
+    holder.close();
+  }
 });
 
 test("help exits 0 and an unknown command exits 2 with usage", async () => {

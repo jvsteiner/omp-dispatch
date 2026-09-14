@@ -124,9 +124,11 @@ state, progress and any supervisor question. On the final collect, pass
 the review is then one read instead of a separate `git diff` (and its
 approval). `omp_list_agents` lists active and finished runs. `omp_usage`
 totals the session's dispatched runs, turns and cost: quote it when reporting
-whether the delegation paid off. `omp_doctor` checks omp, provider keys,
-tiers, agent definitions and the runs directory, and names what to fix — run
-it first whenever the tools misbehave. `omp_answer` answers a question;
+whether the delegation paid off. `omp_doctor` checks omp's exit status,
+its SQLite databases (models/agent/stats, write-probed — a locked or corrupt
+database passes `omp --version` and breaks dispatches), provider keys, tiers,
+agent definitions and the runs directory — run it first whenever the tools
+misbehave. `omp_answer` answers a question;
 `omp_steer` corrects active work; `omp_task_stop` stops it. Follow up after
 completion with `omp_send_message`:
 
@@ -182,7 +184,8 @@ If the server is unavailable for the rest of the session, the `dispatch` CLI
 in the plugin root reads and writes the same run directories:
 
 ```bash
-bun <plugin-root>/bin/dispatch start --prompt "Read src/ and explain retry behavior." --workdir /absolute/path/to/project
+bun <plugin-root>/bin/dispatch start --prompt-file brief.md --workdir /absolute/path/to/project
+# or pipe it: dispatch start --prompt - --workdir ... < brief.md
 bun <plugin-root>/bin/dispatch output latest --workdir /absolute/path/to/project --diff
 bun <plugin-root>/bin/dispatch usage --workdir /absolute/path/to/project
 ```

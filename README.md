@@ -33,8 +33,9 @@ Run controls:
 - **`omp_steer`** interrupts the turn an agent is in the middle of.
 - **`ask_supervisor`** lets a stuck agent ask *you* a question and wait.
   `omp_answer` resumes it.
-- **`omp_doctor`** checks everything a dispatch depends on and names what to
-  fix. The same checks run without the server:
+- **`omp_doctor`** checks everything a dispatch depends on — including
+  whether omp's own SQLite databases (models, agent state, usage stats) are
+  actually writable — and names what to fix. The same checks run without the server:
   `bun <plugin>/bin/server.ts --doctor`.
 - **`omp_usage`** totals the session's dispatched runs, turns and cost.
 - A background start acknowledges the resolved **model and caps** — a wrong
@@ -181,7 +182,7 @@ The `dispatch` CLI is the degraded path — the same run directories, caps,
 reports and diffs, no server needed:
 
 ```bash
-bun <plugin-root>/bin/dispatch start --prompt "..." --workdir /absolute/project
+bun <plugin-root>/bin/dispatch start --prompt-file brief.md --workdir /absolute/project
 bun <plugin-root>/bin/dispatch output latest --workdir /absolute/project --diff
 bun <plugin-root>/bin/dispatch usage --workdir /absolute/project
 ```

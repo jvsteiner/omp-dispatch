@@ -34,6 +34,8 @@ export interface CliOptions {
   /** Injection for tests; production writes to the real streams. */
   out?: (s: string) => void;
   err?: (s: string) => void;
+  /** Reads stdin when a prompt source asks for it. Tests inject a stub. */
+  stdin?: () => Promise<string>;
 }
 
 interface ParsedArgs {
@@ -76,9 +78,12 @@ function usageText(): string {
     "usage: dispatch <command> [options]",
     "",
     "  start      Dispatch a run and monitor it in the foreground.",
-    "             --prompt <text> (required)  --description <text>",
-    "             --model <tier|id>  --subagent-type <name>  --name <name>",
-    "             --workdir <abs path>  --isolation <none|worktree>",
+    "             One prompt source is required:",
+    "               --prompt <text>        inline",
+    "               --prompt-file <path>   file contents",
+    "               --prompt -             stdin, for heredocs and pipes",
+    "             --description <text>  --model <tier|id>  --subagent-type <name>",
+    "             --name <name>  --workdir <abs path>  --isolation <none|worktree>",
     "             --max-turns N  --max-usd F  --max-seconds S",
     "  output     Print a run's report (or progress while it runs).",
     "             <run-id prefix | name | latest>  --workdir <abs path>",
@@ -110,12 +115,54 @@ function findRun(
     r.runId === ref || r.runId.startsWith(ref) || (r.result.name ?? "") === ref);
 }
 
+/**
+ * One brief, three doors: inline text, a file, or stdin (`--prompt -` /
+ * `--prompt-file -`) for heredocs and pipes — the way a multi-paragraph
+ * brief with quotes and backticks actually gets written. Exactly one source
+ * may be given; an empty brief is refused rather than dispatched, because a
+ * run with no task burns its startup cost to say nothing.
+ */
+async function resolvePrompt(flags: Record<string, string>, opts: CliOptions): Promise<string> {
+  const inline = flags["prompt"];
+  const file = flags["prompt-file"];
+  if (inline !== undefined && inline !== "-" && file !== undefined) {
+    throw new Error("pass only one prompt source: --prompt, --prompt-file, or stdin (--prompt -)");
+  }
+
+  const label = inline === "-" ? "stdin (--prompt -)"
+    : file === "-" ? "stdin (--prompt-file -)"
+    : file !== undefined ? `--prompt-file ${file}`
+    : null;
+  let text: string | undefined = inline !== "-" ? inline : undefined;
+  if (file !== undefined && file !== "-") {
+    try {
+      text = await Bun.file(file).text();
+    } catch (e) {
+      throw new Error(`cannot read --prompt-file ${file}: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+  if (inline === "-" || file === "-") {
+    const reader = opts.stdin ?? (() => Bun.stdin.text());
+    text = await reader();
+  }
+  if (text === undefined) {
+    throw new Error("start requires a prompt: --prompt <text>, --prompt-file <path>, or --prompt - for stdin");
+  }
+  if (text.trim().length === 0) {
+    throw new Error(`the prompt from ${label ?? "--prompt"} was empty — refusing to dispatch a run with no task`);
+  }
+  return text;
+}
+
 async function cmdStart(argv: string[], opts: CliOptions): Promise<number> {
   const { flags } = parseArgs(argv);
   const out = opts.out ?? (s => process.stdout.write(s));
   const err = opts.err ?? (s => process.stderr.write(s));
-  const prompt = flags["prompt"];
-  if (!prompt) return die(err, "start requires --prompt <text>");
+  // Long briefs are files or pipes, not shell-quoted one-liners; resolving
+  // all three sources here keeps every later line working with a string.
+  // Throws (→ exit 1 via runCli) rather than die(): the messages are the
+  // contract for both.
+  const prompt = await resolvePrompt(flags, opts);
   const baseWorkdir = resolve(flags["workdir"] ?? process.cwd());
   const home = process.env.HOME ?? "";
   const name = flags["name"] ?? uniqueName(flags["description"] ?? prompt, () => false);

@@ -70,7 +70,7 @@ is omitted, for existing Claude Code workflows.
 | `omp_steer` | Correct an active run using `to` and `message` |
 | `omp_answer` | Answer a supervisor question using `name` and `text` |
 | `omp_usage` | Session totals — runs, turns, cost — the evidence delegation paid off |
-| `omp_doctor` | Check omp, providers, tiers, definitions and the runs dir; run first when tools misbehave |
+| `omp_doctor` | Check omp, its SQLite databases, providers, tiers, definitions and the runs dir; run first when tools misbehave |
 | `omp_models` | Inspect the configured OMP model catalogue |
 | `omp_ping` | Check the OMP executable/version |
 
@@ -131,8 +131,8 @@ delegate through this plugin at all.
    `bun <plugin-root>/bin/server.ts --bootstrap` so dependency installation
    never eats the host's MCP startup budget.
 4. Use the `dispatch` CLI in the plugin root for the degraded path:
-   `bun <plugin-root>/bin/dispatch start --prompt "..." --workdir <project>`
-   (foreground; monitor it), then `... dispatch output latest --workdir
+   `bun <plugin-root>/bin/dispatch start --prompt-file <brief.md> --workdir <project>`
+   (or `--prompt -` to pipe the brief; foreground; monitor it), then `... dispatch output latest --workdir
    <project> --diff`, `list`, `usage`, `stop`, `doctor` — the same run
    directories on disk, the same reports and footers. Steering and answering
    questions need the live MCP server; everything else survives without it.

@@ -1,6 +1,7 @@
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { Database } from "bun:sqlite";
 import { loadProviderKeys } from "./env.ts";
 import { loadTierConfig } from "./models.ts";
 import { runsRoot } from "./rundir.ts";
@@ -38,6 +39,60 @@ function findOmp(): { path: string; from: "PATH" | "package" } {
   };
 }
 
+/**
+ * omp's own SQLite databases, which a dispatch writes to even when the task
+ * itself is read-only: the model catalogue (models.db), session state
+ * (agent.db) and usage tracking (stats.db — the numbers the caps are
+ * enforced from). `omp --version` touches none of them, so an unwritable or
+ * locked database sails past a version check and surfaces later as a
+ * mid-dispatch failure.
+ */
+function ompDatabases(home: string): string[] {
+  return [
+    join(home, ".omp", "agent", "models.db"),
+    join(home, ".omp", "agent", "agent.db"),
+    join(home, ".omp", "stats.db"),
+  ];
+}
+
+/**
+ * Proves one SQLite database is writable: takes a write lock, creates and
+ * drops a throwaway table inside the transaction, rolls back. Catches the
+ * failure modes that break a dispatch — corrupt header, read-only file,
+ * another process holding the write lock — without leaving content behind.
+ * Returns null when the database is writable, or the failure to report.
+ *
+ * Two attempts around a short busy_timeout: a concurrent omp process
+ * mid-write is normal and transient and must not flunk the doctor.
+ */
+function probeSqlite(path: string): string | null {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let db: Database | undefined;
+    try {
+      db = new Database(path);
+      db.exec("PRAGMA busy_timeout = 500");
+      // A write lock alone (BEGIN IMMEDIATE) can succeed on a connection
+      // that has silently fallen back to read-only, because locking is not
+      // writing. CREATE + DROP of a throwaway table forces one real page
+      // write, and the wrapping transaction rolls it all back either way.
+      db.exec("BEGIN IMMEDIATE");
+      db.exec("CREATE TABLE _omp_dispatch_doctor_probe(x)");
+      db.exec("DROP TABLE _omp_dispatch_doctor_probe");
+      db.exec("ROLLBACK");
+      return null;
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      if (attempt === 1) return message;
+      // A plain "locked" is the one retriable answer; anything else
+      // (readonly, corrupt, missing header) is deterministic.
+      if (!/locked|busy/i.test(message)) return message;
+    } finally {
+      db?.close();
+    }
+  }
+  return null;
+}
+
 export async function runDiagnostics(workdir: string): Promise<DoctorReport> {
   // env.HOME, not os.homedir(): matches env.ts and stays controllable by
   // tests (and by hosts that launch the server under a different HOME).
@@ -63,8 +118,19 @@ export async function runDiagnostics(workdir: string): Promise<DoctorReport> {
 
   try {
     const omp = findOmp();
-    const version = await Bun.$`${omp.path} --version`.nothrow().quiet().text();
-    ok("omp", `${version.trim() || "present"} (${omp.from}: ${omp.path})`);
+    // Exit status, not just spawn success: an omp that crashes on startup
+    // (a corrupt model database among the causes) prints its crash to
+    // stderr, exits nonzero, and would otherwise be reported healthy off
+    // its --version text alone.
+    const r = await Bun.$`${omp.path} --version`.nothrow().quiet();
+    if (r.exitCode !== 0) {
+      const stderr = r.stderr.toString().trim().split("\n").slice(-3).join(" | ");
+      fail("omp", `${omp.path} --version exited ${r.exitCode}` +
+        (stderr ? `: ${stderr}` : " (no stderr)"));
+    } else {
+      const version = r.stdout.toString().trim();
+      ok("omp", `${version || "present"} (${omp.from}: ${omp.path})`);
+    }
   } catch (e) {
     fail("omp", `not resolvable — ${e instanceof Error ? e.message : e}. ` +
       `Install omp and make sure \`omp --version\` works for the process ` +
@@ -113,7 +179,26 @@ export async function runDiagnostics(workdir: string): Promise<DoctorReport> {
     fail("runs dir", `not writable: ${runsDir} — ${e instanceof Error ? e.message : e}`);
   }
 
-  const total = 6;
+  // The check --version cannot make: can omp actually WRITE its own state?
+  const dbs = ompDatabases(home);
+  const present = dbs.filter(existsSync);
+  if (present.length === 0) {
+    note("databases", `none of omp's exist yet (${dbs.join(", ")}) — created on first use`);
+  } else {
+    const broken = present
+      .map(p => ({ path: p, error: probeSqlite(p) }))
+      .filter((r): r is { path: string; error: string } => r.error !== null);
+    if (broken.length > 0) {
+      for (const b of broken) {
+        fail("databases", `${b.path}: ${b.error}`);
+      }
+    } else {
+      ok("databases", `${present.length}/${dbs.length} present, all writable ` +
+        `(models.db, agent.db, stats.db)`);
+    }
+  }
+
+  const total = 7;
   lines.push(
     `doctor: ${total - failures}/${total} checks passed` +
       (notes > 0 ? ` (${notes} note${notes === 1 ? "" : "s"})` : ""),

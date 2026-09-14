@@ -1,5 +1,5 @@
 import { test, expect, beforeAll, afterAll, afterEach } from "bun:test";
-import { mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -125,7 +125,28 @@ test("omp_doctor reports every dependency of a dispatch", async () => {
   expect(text).toMatch(/(OK|NOTE)\s+providers /);
   expect(text).toMatch(/OK\s+tiers\s+default sonnet -> deepseek\/deepseek-flash/);
   expect(text).toMatch(/OK\s+runs\s+dir\s+writable: /);
-  expect(text).toMatch(/doctor: 6\/6 checks passed/);
+  expect(text).toMatch(/doctor: 7\/7 checks passed/);
+});
+
+test("omp_doctor fails loudly when an omp database cannot be written", async () => {
+  const c = await connect();
+  // A corrupt "database" is the deterministic stand-in for the real-world
+  // failure class (locked, read-only, corrupt): omp --version still exits 0,
+  // so this is precisely what the version-only check used to miss.
+  const home = mkdtempSync(join(tmpdir(), "omp-dispatch-brokenhome-"));
+  mkdirSync(join(home, ".omp", "agent"), { recursive: true });
+  writeFileSync(join(home, ".omp", "agent", "models.db"), "not a sqlite database at all");
+  const originalHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    const r: any = await call(c, "omp_doctor", { workdir: "/tmp" });
+    expect(r.isError).toBe(true);
+    expect(r.content[0].text).toContain("FAIL databases");
+    expect(r.content[0].text).toContain("file is not a database");
+    expect(r.content[0].text).toMatch(/doctor: [67]\/7 checks passed/);
+  } finally {
+    process.env.HOME = originalHome;
+  }
 });
 
 test("a settled run collects with its git diff, and the footer points at diff.patch", async () => {

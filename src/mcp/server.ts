@@ -1,14 +1,18 @@
 import { z } from "zod";
-import { join, dirname } from "node:path";
+import { join } from "node:path";
 import { readFileSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { loadProviderKeys } from "../env.ts";
-import { loadTierConfig, resolveModel } from "../models.ts";
 import { startRun } from "../runner.ts";
+import {
+  AGENT_DEFAULTS, capsFor, pluginVersion, resolveAgentDef, resolveDispatchModel, resultFooter,
+} from "../dispatch.ts";
+import { runDiagnostics } from "../doctor.ts";
+import { readDiff } from "../rundir.ts";
+import type { AgentDef } from "../agentdef.ts";
 import { newRunId, createRunDir, pruneRuns } from "../rundir.ts";
 import { createRegistry, uniqueName, type RunRegistry } from "./runs.ts";
-import { discoverAgentDefs, type AgentDef } from "../agentdef.ts";
 import { createWorktree, type Worktree } from "../worktree.ts";
 
 /**
@@ -34,34 +38,10 @@ async function runOmp(args: string[], extraEnv: Record<string, string> = {}): Pr
   return result.stdout.toString().trim();
 }
 
-function pluginVersion(): string {
-  try {
-    // Both host manifests are kept in step with the shared package version.
-    const manifest = join(dirname(import.meta.path), "..", "..", "package.json");
-    return JSON.parse(readFileSync(manifest, "utf8")).version ?? "0.0.0";
-  } catch {
-    return "0.0.0";
-  }
-}
 
 const MODEL_DESCRIPTION =
   "A tier name from your config (haiku, sonnet, opus, or one of your own), or any omp " +
   "model id such as `deepseek/deepseek-v4-pro`. Run `omp_models` to see what is available.";
-
-/**
- * omp_agent's own defaults — deliberately not src/taskfile.ts's TASK_DEFAULTS,
- * which exists for the unattended file-driven path where nobody is blocked
- * waiting on the result. omp_agent blocks a live Claude turn, so maxSeconds
- * here favors a bounded wait over unattended endurance: the v1 reference run
- * (docs/specs/2026-09-12-omp-dispatch-design.md) took ~700s end to end, and
- * 1200s gives roughly double that for a slower model or a retry.
- */
-const AGENT_DEFAULTS = {
-  tools: "read,write,edit,bash",
-  maxTurns: 120,
-  maxUsd: 1.0,
-  maxSeconds: 1200,
-};
 
 export interface CreateServerOptions {
   /**
@@ -166,40 +146,19 @@ export function createServer(opts: CreateServerOptions = {}): McpServer {
           "working directory.",
       ),
       run_in_background: z.boolean().optional().describe(
-        "Return the run name after startup; collect the report with omp_task_output. Recommended for Codex.",
+        "Return the run name, resolved model and caps after startup; collect the report " +
+        "with omp_task_output. Recommended for Codex.",
       ),
     },
     async ({ description, prompt, subagent_type, model, name, isolation, workdir, run_in_background }, extra) => {
       const baseWorkdir = workdir ?? process.cwd();
       let targetWorkdir = baseWorkdir;
 
-      // Resolved BEFORE any run starts, so a refusal costs nothing.
-      let def: AgentDef | undefined;
-      if (subagent_type) {
-        const { defs, errors } = discoverAgentDefs(targetWorkdir, process.env.HOME ?? "");
-        def = defs.get(subagent_type);
-        if (!def) {
-          const available = [...defs.keys()].sort();
-          throw new Error(
-            `omp_agent: no agent definition named '${subagent_type}' under ` +
-              `.omp-dispatch/agents or .claude/agents in ${targetWorkdir} or the home directory. ` +
-              (available.length
-                ? `Available: ${available.join(", ")}.`
-                : `No definitions were found.`) +
-              (errors.length ? ` Parse errors: ${errors.join("; ")}` : ""),
-          );
-        }
-        // An agent quietly missing the tool it was written around produces
-        // confident wrong work. Refuse, and name everything that is missing.
-        if (def.droppedTools.length > 0) {
-          throw new Error(
-            `omp_agent: agent '${subagent_type}' (${def.source}) requires ` +
-              `${def.droppedTools.length === 1 ? "a tool" : "tools"} omp has no equivalent ` +
-              `for: ${def.droppedTools.join(", ")}. Refusing rather than running a weakened ` +
-              `agent — use a native subagent for this one.`,
-          );
-        }
-      }
+      // Resolved BEFORE any run starts, so a refusal costs nothing. The
+      // refusal texts live in src/dispatch.ts, shared verbatim with the CLI.
+      const def: AgentDef | undefined = subagent_type
+        ? resolveAgentDef(subagent_type, targetWorkdir, process.env.HOME ?? "")
+        : undefined;
 
       let runName: string;
       if (name) {
@@ -227,13 +186,8 @@ export function createServer(opts: CreateServerOptions = {}): McpServer {
           targetWorkdir = worktree.path;
         }
         const home = process.env.HOME ?? "";
-        const cfg = loadTierConfig([
-          join(home, ".omp-dispatch", "config.json"),
-          join(targetWorkdir, ".omp-dispatch", "config.json"),
-        ]);
-        // Precedence, highest first: explicit argument, the definition's
-        // model:, then the configured default tier.
-        const resolvedModel = resolveModel(model ?? def?.model, cfg);
+        const resolvedModel = resolveDispatchModel(model, def, targetWorkdir, home);
+        const caps = capsFor(def);
 
         const runId = newRunId();
         const runDir = createRunDir(targetWorkdir, runId);
@@ -244,13 +198,14 @@ export function createServer(opts: CreateServerOptions = {}): McpServer {
         const handle = await startRun(
           {
             prompt,
+            name: runName,
             model: resolvedModel,
             workdir: targetWorkdir,
             tools: def ? def.ompTools.join(",") : AGENT_DEFAULTS.tools,
             systemPrompt: def?.systemPrompt,
-            maxTurns: def?.maxTurns ?? AGENT_DEFAULTS.maxTurns,
-            maxUsd: AGENT_DEFAULTS.maxUsd,
-            maxSeconds: AGENT_DEFAULTS.maxSeconds,
+            maxTurns: caps.maxTurns,
+            maxUsd: caps.maxUsd,
+            maxSeconds: caps.maxSeconds,
             env: loadProviderKeys(),
             command: opts.command,
           },
@@ -321,16 +276,11 @@ export function createServer(opts: CreateServerOptions = {}): McpServer {
             );
           }
 
-
-          // Sourced from RunResult.model, not the resolved request string: it
-          // is filled from the agent's own reported state (runner.ts, via
-          // get_state) and is the one field that can drift from what was
-          // actually asked for.
-          const modelLabel = result.model ? `${result.model.provider}/${result.model.id}` : resolvedModel;
-          const footer =
-            `\n\n---\n[omp:${runName}] model=${modelLabel} turns=${result.turns} ` +
-            `tool_calls=${result.tool_calls} cost_usd=${result.cost_usd.toFixed(4)} ` +
-            `seconds=${result.seconds} stopped_because=${result.stopped_because}`;
+          // The footer prefers RunResult.model — the agent's own reported
+          // state, and the one field that can drift from what was asked for —
+          // falling back to the resolved request string only when the run
+          // ended before it could report one.
+          const footer = resultFooter(runName, result, { modelLabel: resolvedModel, runDir });
 
           return {
             content: [{ type: "text", text: (result.last_reply ?? "(no reply)") + footer + isolationNote }],
@@ -339,8 +289,13 @@ export function createServer(opts: CreateServerOptions = {}): McpServer {
         const done = track(runName, finish());
         if (run_in_background) {
           return { content: [{ type: "text", text:
-            `Started '${runName}'. Collect with omp_task_output({name: ${JSON.stringify(runName)}, wait_seconds: 25}). ` +
-            `Run directory: ${runDir}`,
+            `Started '${runName}' model=${resolvedModel} ` +
+            `max_turns=${caps.maxTurns} max_usd=${caps.maxUsd.toFixed(2)} ` +
+            `max_seconds=${caps.maxSeconds}.\n` +
+            `Collect with omp_task_output({name: ${JSON.stringify(runName)}, wait_seconds: 25}). ` +
+            `Run directory: ${runDir}\n` +
+            `Wrong model? omp_task_stop({name: ${JSON.stringify(runName)}}) and dispatch again ` +
+            `with model=<id> — omp_models lists what is available.`,
           }] };
         }
         return await done;
@@ -388,11 +343,7 @@ export function createServer(opts: CreateServerOptions = {}): McpServer {
       }
       const finish = async (): Promise<Reply> => {
         const reply = await handle.say(message);
-        const r = handle.result;
-        const footer =
-          `\n\n---\n[omp:${to}] turns=${r.turns} tool_calls=${r.tool_calls} ` +
-          `cost_usd=${r.cost_usd.toFixed(4)} seconds=${r.seconds} ` +
-          `stopped_because=${r.stopped_because}`;
+        const footer = resultFooter(to, handle.result, { runDir: handle.runDir });
         return { content: [{ type: "text", text: (reply || "(no reply)") + footer }] };
       };
       const done = track(to, finish());
@@ -437,17 +388,80 @@ export function createServer(opts: CreateServerOptions = {}): McpServer {
   );
 
   server.tool(
+    "omp_usage",
+    "Session totals for dispatched work: runs by outcome, turns, tool calls, cost and " +
+      "wall time, plus one line per run. The evidence for whether delegation is paying " +
+      "off — collect it before reporting a delegated result.",
+    {},
+    async () => {
+      const runs = registry.list();
+      if (runs.length === 0) {
+        return { content: [{ type: "text", text: "No omp agents have run in this session." }] };
+      }
+      const by: Record<string, number> = {};
+      let turns = 0, toolCalls = 0, cost = 0, seconds = 0;
+      for (const { handle } of runs) {
+        const r = handle.result;
+        by[r.state] = (by[r.state] ?? 0) + 1;
+        turns += r.turns;
+        toolCalls += r.tool_calls;
+        cost += r.cost_usd;
+        seconds += r.seconds;
+      }
+      const outcomes = ["completed", "capped", "aborted", "error", "running", "asking"]
+        .map(s => `${s}=${by[s] ?? 0}`).join(" ");
+      const perRun = runs
+        .slice()
+        .sort((a, b) => a.name.localeCompare(b.name))
+        .map(({ name, handle }) =>
+          `${name}  ${handle.result.state.padEnd(9)} turns=${handle.result.turns} ` +
+          `cost_usd=${handle.result.cost_usd.toFixed(4)} ${handle.result.stopped_because ?? ""}`.trimEnd())
+        .join("\n");
+      const text =
+        `session dispatched usage: runs=${runs.length} (${outcomes})\n` +
+        `turns=${turns} tool_calls=${toolCalls} cost_usd=${cost.toFixed(4)} wall_seconds=${seconds}\n` +
+        perRun;
+      return { content: [{ type: "text", text }] };
+    },
+  );
+
+  server.tool(
     "omp_task_output",
     "Show state, pending questions and progress, or the final report for a settled run. " +
-      "Optionally wait up to 30 seconds, below Codex's default MCP timeout.",
+      "Optionally wait up to 30 seconds, below Codex's default MCP timeout. Set " +
+      "include_diff to append the run's git diff to a settled report, so a review needs " +
+      "no separate git call.",
     {
       name: z.string().describe("The run's name."),
       lines: z.number().optional().describe("How many trailing lines to show. Default 40."),
       wait_seconds: z.number().min(0).max(30).optional().describe("Wait for completion up to this many seconds. Default 0."),
+      include_diff: z.boolean().optional().describe(
+        "Append the run's git diff (diff.patch, git-derived) to a settled report. Default false.",
+      ),
     },
-    async ({ name, lines, wait_seconds }) => {
+    async ({ name, lines, wait_seconds, include_diff }) => {
+      // Review-shaped collection: the settled report plus, on request, the
+      // very diff a reviewer would otherwise need git (and an approval) to
+      // see. Error replies pass through untouched — the failure is the
+      // message, and a run that never ran has no diff worth appending.
+      const withDiff = (reply: Reply): Reply => {
+        if (!include_diff || reply.isError) return reply;
+        const runHandle = registry.get(name);
+        if (!runHandle) return reply;
+        const diff = readDiff(runHandle.runDir);
+        const body = reply.content[0]?.text ?? "";
+        return {
+          ...reply,
+          content: [{
+            type: "text",
+            text: body + (diff
+              ? `\n\n--- diff (git-derived, vs run start) ---\n${diff}`
+              : "\n\n(no file changes — no diff was written)"),
+          }],
+        };
+      };
       const operation = operations.get(name);
-      if (operation?.reply) return operation.reply;
+      if (operation?.reply) return withDiff(operation.reply);
       const handle = mustFind(name, "omp_task_output");
       if (operation && wait_seconds && handle.result.state !== "asking") {
         let timer: ReturnType<typeof setTimeout> | undefined;
@@ -456,7 +470,7 @@ export function createServer(opts: CreateServerOptions = {}): McpServer {
             timer = setTimeout(resolve, wait_seconds * 1000);
           })]);
         } finally { clearTimeout(timer); }
-        if (operation.reply) return operation.reply;
+        if (operation.reply) return withDiff(operation.reply);
       }
       const status = `run '${name}': state=${handle.result.state}` +
         (handle.result.ask ? ` question=${JSON.stringify(handle.result.ask)}` : "");
@@ -523,6 +537,26 @@ export function createServer(opts: CreateServerOptions = {}): McpServer {
       } catch (e) {
         throw new Error(`omp_ping failed: ${e instanceof Error ? e.message : e}`);
       }
+    },
+  );
+
+  server.tool(
+    "omp_doctor",
+    "Check everything a dispatch depends on: omp on PATH, provider keys, tier config, " +
+      "agent definitions and the runs directory. Run this first when omp_* tools are " +
+      "missing or misbehaving — it names what to fix. The same checks run without this " +
+      "server via `bun <plugin>/bin/server.ts --doctor`.",
+    {
+      workdir: z.string().optional().describe(
+        "Absolute project path to check definitions and config for. Defaults to this " +
+        "server process's own working directory.",
+      ),
+    },
+    async ({ workdir }) => {
+      const report = await runDiagnostics(workdir ?? process.cwd());
+      return report.ok
+        ? { content: [{ type: "text", text: report.text }] }
+        : { content: [{ type: "text", text: report.text }], isError: true };
     },
   );
 

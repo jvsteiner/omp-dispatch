@@ -33,6 +33,13 @@ Run controls:
 - **`omp_steer`** interrupts the turn an agent is in the middle of.
 - **`ask_supervisor`** lets a stuck agent ask *you* a question and wait.
   `omp_answer` resumes it.
+- **`omp_doctor`** checks everything a dispatch depends on and names what to
+  fix. The same checks run without the server:
+  `bun <plugin>/bin/server.ts --doctor`.
+- **`omp_usage`** totals the session's dispatched runs, turns and cost.
+- A background start acknowledges the resolved **model and caps** — a wrong
+  tier is catchable at dispatch time — and `omp_task_output` accepts
+  **`include_diff`** to return a run's git diff with its report.
 
 ## Install
 
@@ -69,7 +76,7 @@ Requires `omp` and `bun` on PATH.
 |---|---|
 | `.claude-plugin/` | Claude manifest and marketplace (also readable by Codex) |
 | `.codex-plugin/plugin.json`, `.mcp.json` | Codex manifest and MCP launch configuration |
-| `src/`, `bin/server.ts` | Shared runner, lifecycle and MCP server |
+| `src/`, `bin/` | Shared runner, lifecycle, MCP server and the `dispatch` CLI |
 | `skills/omp-subagents/` | Delegation workflow for both hosts |
 | `agents/` | Optional Markdown role templates for either host |
 | `docs/codex.md` | Codex installation, limitations and examples |
@@ -140,10 +147,11 @@ reported.
 
 ## Where run state lives, and how it is cleaned
 
-Each run writes a directory — its prompt, a progress log, the raw RPC frames
-and a `result.json`. **None of it goes in your repository.** It lives under
-`~/.omp-dispatch/runs/<project>-<hash>/`, grouped per project, the way omp
-keeps its own sessions under `~/.omp/agent/sessions/`. Nothing to gitignore.
+Each run writes a directory — its prompt, a progress log, a `result.json`
+and, when the run changed files, a `diff.patch`. **None of it goes in your
+repository.** It lives under `~/.omp-dispatch/runs/<project>-<hash>/`,
+grouped per project, the way omp keeps its own sessions under
+`~/.omp/agent/sessions/`. Nothing to gitignore.
 
 A run costs roughly 60KB. The server still prunes on startup, so it cannot
 accumulate across months of use:
@@ -151,13 +159,37 @@ accumulate across months of use:
 - anything older than **7 days**
 - anything beyond the most recent **50 runs per project**
 
-It says so on stderr when it removes something. Deleting the whole directory by
-hand is safe at any time; nothing depends on it after a run has settled.
+It says so on stderr when it removes something. Deleting the whole directory
+by hand is safe at any time; nothing depends on it after a run has settled.
 
 ## Verifying a run
 
-`files_changed` is computed from git, never from the agent's account of itself.
-Read the diff, not the summary.
+`files_changed` is computed from git, never from the agent's account of itself
+— including edits to files that were already dirty when the run started. The
+run directory holds the diff itself in `diff.patch`, and
+`omp_task_output(..., include_diff: true)` returns it with the report, so a
+review is one read instead of a `git diff` and its approval. Read the diff,
+not the summary.
+
+## When the MCP server is unavailable
+
+`bun <plugin-root>/bin/server.ts --doctor` runs all the `omp_doctor` checks
+with no working server required, and `--bootstrap` installs dependencies off
+the host's MCP startup budget after an install or update.
+
+The `dispatch` CLI is the degraded path — the same run directories, caps,
+reports and diffs, no server needed:
+
+```bash
+bun <plugin-root>/bin/dispatch start --prompt "..." --workdir /absolute/project
+bun <plugin-root>/bin/dispatch output latest --workdir /absolute/project --diff
+bun <plugin-root>/bin/dispatch usage --workdir /absolute/project
+```
+
+`start` runs in the foreground; `stop` settles a CLI-started run as aborted
+by signalling its monitor. Steering and supervisor questions need the live
+server. Don't drop to raw `omp` — that quietly loses the caps, the usage
+accounting and the change report.
 
 ## What it does not do
 

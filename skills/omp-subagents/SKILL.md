@@ -45,9 +45,15 @@ before relying on them in an isolated run.
 
 Collect with `omp_task_output({"name":"retry-review","wait_seconds":25})`.
 It returns status and progress while active, a question when asking, and the
-final report when finished. Waits are capped at 30 seconds to fit Codex's MCP
+final report when finished; pass `include_diff: true` to get the run's
+git-derived diff appended to a settled report, so reviewing it needs no
+separate git call. Waits are capped at 30 seconds to fit Codex's MCP
 timeout. Do useful independent work between polls; otherwise use a bounded
 wait. Continue collecting until the requested work has settled.
+
+The start acknowledgement names the resolved model and caps. Read it: a
+wrong model is free to fix at dispatch time (`omp_task_stop`, then dispatch
+again with `model:`) and expensive to discover after the run.
 
 `omp_agent` and `omp_send_message` remain blocking when `run_in_background`
 is omitted, for existing Claude Code workflows.
@@ -59,10 +65,12 @@ is omitted, for existing Claude Code workflows.
 | `omp_agent` | Start work; use `run_in_background: true` in Codex |
 | `omp_send_message` | Continue a completed run using `to`, `message`, and background mode |
 | `omp_list_agents` | List this server session's runs, states, turns and costs |
-| `omp_task_output` | Collect report, progress or pending question; optional `wait_seconds` |
+| `omp_task_output` | Collect report, progress or pending question; `wait_seconds`, `include_diff` |
 | `omp_task_stop` | Stop a run by `name` |
 | `omp_steer` | Correct an active run using `to` and `message` |
 | `omp_answer` | Answer a supervisor question using `name` and `text` |
+| `omp_usage` | Session totals — runs, turns, cost — the evidence delegation paid off |
+| `omp_doctor` | Check omp, providers, tiers, definitions and the runs dir; run first when tools misbehave |
 | `omp_models` | Inspect the configured OMP model catalogue |
 | `omp_ping` | Check the OMP executable/version |
 
@@ -93,13 +101,43 @@ not imported. Unsupported required tools are refused explicitly.
 ## Check results
 
 Read `stopped_because`: `completed` is completion; caps, aborts and errors mean
-the work may be partial. Read the diff and run relevant checks before accepting
-an agent's claims. Git-derived `files_changed` is in the run's `result.json`.
+the work may be partial. Read the diff — `include_diff: true` on
+`omp_task_output`, or `diff.patch` in the run directory — and run relevant
+checks before accepting an agent's claims. Git-derived `files_changed` is in
+the run's `result.json` and the report footer.
+
+Write briefs that make verification cheap: require the agent to return
+evidence (path:line citations, links, command output) so reviewing its report
+replaces re-running its work. Do one focused review of the collected result
+rather than duplicating the agent's investigation in the supervising session —
+every host-side check you run is an approval prompt the delegation was
+supposed to remove.
 
 A dirty worktree is kept and its path reported. A clean worktree is removed
 after the initial run, so start a new isolated run instead of resuming one
 whose worktree was removed. Work is not merged automatically.
 
+## When the omp_* tools are missing
+
+If the server's tools are not available, do not fall back to running `omp`
+directly — that loses the caps, the usage accounting, `ask_supervisor`,
+git-derived `files_changed` and the diff, which is most of the reason to
+delegate through this plugin at all.
+
+1. Find the plugin root (the checkout the marketplace cloned).
+2. Run `bun <plugin-root>/bin/server.ts --doctor --workdir <project>` — it
+   works even when the server cannot start, and names what to fix.
+3. After an install or an update, pre-warm once with
+   `bun <plugin-root>/bin/server.ts --bootstrap` so dependency installation
+   never eats the host's MCP startup budget.
+4. Use the `dispatch` CLI in the plugin root for the degraded path:
+   `bun <plugin-root>/bin/dispatch start --prompt "..." --workdir <project>`
+   (foreground; monitor it), then `... dispatch output latest --workdir
+   <project> --diff`, `list`, `usage`, `stop`, `doctor` — the same run
+   directories on disk, the same reports and footers. Steering and answering
+   questions need the live MCP server; everything else survives without it.
+
 Runs and continuation handles belong to the current MCP server process.
 Disconnecting stops its child processes; saved artifacts remain under
-`~/.omp-dispatch/runs/`, but cannot be resumed by name after a restart.
+`~/.omp-dispatch/runs/` and stay readable through `dispatch output`, but a run
+cannot be resumed by name after a restart.

@@ -43,6 +43,17 @@ After publishing these changes, the marketplace can also be added using
 `codex plugin marketplace add jvsteiner/omp-dispatch`. For updates use
 `codex plugin marketplace upgrade omp-dispatch`, then start a new conversation.
 
+After an install or an update, pre-warm the launcher once so the first MCP
+start of a new conversation spends its budget on protocol, not packages:
+
+```bash
+bun /absolute/path/to/omp-dispatch/bin/server.ts --bootstrap
+```
+
+If the server ever fails to start or the `omp_*` tools are missing, run
+`bun /absolute/path/to/omp-dispatch/bin/server.ts --doctor --workdir <project>`
+— it works without a working server and names what to fix.
+
 ## Manual MCP setup
 
 For clients without plugin installation, add this to `~/.codex/config.toml`
@@ -100,10 +111,21 @@ Then call `omp_task_output`:
 {"name":"retry-review","wait_seconds":25}
 ```
 
+The dispatch acknowledgement names the resolved model and the caps — check it
+against what you intended; a wrong tier is free to fix now (`omp_task_stop`,
+redispatch with `model`) and expensive to discover after the run.
+
 Repeat bounded waits until the report arrives. A pending response includes
-state, progress and any supervisor question. `omp_list_agents` lists active and
-finished runs. `omp_answer` answers a question; `omp_steer` corrects active work;
-`omp_task_stop` stops it. Follow up after completion with `omp_send_message`:
+state, progress and any supervisor question. On the final collect, pass
+`include_diff: true` to get the run's git-derived diff appended to the report —
+the review is then one read instead of a separate `git diff` (and its
+approval). `omp_list_agents` lists active and finished runs. `omp_usage`
+totals the session's dispatched runs, turns and cost: quote it when reporting
+whether the delegation paid off. `omp_doctor` checks omp, provider keys,
+tiers, agent definitions and the runs directory, and names what to fix — run
+it first whenever the tools misbehave. `omp_answer` answers a question;
+`omp_steer` corrects active work; `omp_task_stop` stops it. Follow up after
+completion with `omp_send_message`:
 
 ```json
 {"to":"retry-review","message":"Also check the tests for missing cases.","run_in_background":true}
@@ -145,3 +167,25 @@ They do not choose Claude or Codex models. Both hosts use the same
 `~/.omp-dispatch/config.json` and per-project overrides. Use `omp_models` to
 inspect the OMP catalogue. Actual savings depend on the selected provider and
 task; no Codex cost comparison has been measured here.
+
+## When the server will not start
+
+`bun <plugin-root>/bin/server.ts --doctor --workdir <project>` runs the same
+checks as `omp_doctor` with no working server required — use it first; it
+names what to fix. After an install or update, `--bootstrap` installs
+dependencies off the MCP startup path.
+
+If the server is unavailable for the rest of the session, the `dispatch` CLI
+in the plugin root reads and writes the same run directories:
+
+```bash
+bun <plugin-root>/bin/dispatch start --prompt "Read src/ and explain retry behavior." --workdir /absolute/path/to/project
+bun <plugin-root>/bin/dispatch output latest --workdir /absolute/path/to/project --diff
+bun <plugin-root>/bin/dispatch usage --workdir /absolute/path/to/project
+```
+
+`start` runs in the foreground (monitor it, or background the shell task);
+`stop` signals a CLI-started run's monitor to settle it as aborted. Steering
+and supervisor questions need the live server; dispatch, collection, diffs and
+usage do not. Do not fall back to invoking `omp` directly — that loses caps,
+usage accounting, ask/answer and git-derived change reports.

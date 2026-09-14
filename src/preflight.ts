@@ -1,4 +1,5 @@
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 /**
@@ -78,33 +79,57 @@ async function isRepo(workdir: string): Promise<boolean> {
   return r.exitCode === 0;
 }
 
-function parsePorcelain(text: string): string[] {
-  return text
-    .split("\n")
-    .map(l => l.slice(3).trim())
-    .filter(Boolean)
-    .map(p => {
-      // A rename/copy line reads "old -> new"; report the destination, since
-      // that's the path that actually exists on disk.
-      const arrow = p.indexOf(" -> ");
-      return arrow < 0 ? p : p.slice(arrow + 4);
-    })
-    .sort();
-}
+/**
+ * Captures the FULL current content of a worktree — tracked and untracked,
+ * clean and dirty alike — as one tree sha, without touching the real index,
+ * the working tree, or anything the user (or a concurrent run) might be
+ * doing. `git-stash`'s own trick: a throwaway GIT_INDEX_FILE seeded from
+ * nothing, `add -A` into it, `write-tree` out of it.
+ *
+ * A name-list snapshot (the old approach) could not see an edit to a file
+ * that was ALREADY dirty when the run started — exactly the file a shared
+ * workdir dispatch is most likely to touch. A tree snapshot can: the diff
+ * between two trees is by content, not by status.
+ */
+export interface GitSnapshot { tree: string }
 
-/** Returns the dirty-file list, or null when workdir is not a git repo. */
-export async function gitSnapshot(workdir: string): Promise<string[] | null> {
+export async function gitSnapshot(workdir: string): Promise<GitSnapshot | null> {
   if (!await isRepo(workdir)) return null;
-  return parsePorcelain(await Bun.$`git status --porcelain`.cwd(workdir).text());
+  const tmpIndex = mkdtempSync(join(tmpdir(), "omp-dispatch-index-"));
+  try {
+    const env = { ...process.env, GIT_INDEX_FILE: join(tmpIndex, "index") };
+    const add = await Bun.$`git add -A`.cwd(workdir).env(env).nothrow().quiet();
+    if (add.exitCode !== 0) {
+      throw new Error(`git add -A failed in ${workdir}: ${add.stderr.toString().trim()}`);
+    }
+    const tree = (await Bun.$`git write-tree`.cwd(workdir).env(env).quiet().text()).trim();
+    if (!/^[0-9a-f]{40,64}$/.test(tree)) {
+      throw new Error(`unexpected git write-tree output in ${workdir}: ${tree}`);
+    }
+    return { tree };
+  } finally {
+    rmSync(tmpIndex, { recursive: true, force: true });
+  }
 }
 
-/** Files dirty now that were not dirty before. Never trust the agent for this. */
-export async function gitChangedSince(
+/**
+ * What changed between a snapshot and now: the file list and the patch.
+ * git-derived, never taken from the agent's account of itself. Null when
+ * there was no baseline (not a repo); empty lists when nothing changed.
+ */
+export async function gitDiffSince(
   workdir: string,
-  before: string[] | null,
-): Promise<string[]> {
-  if (before === null) return [];
-  const after = parsePorcelain(await Bun.$`git status --porcelain`.cwd(workdir).text());
-  const was = new Set(before);
-  return after.filter(f => !was.has(f));
+  before: GitSnapshot | null,
+): Promise<{ files: string[]; patch: string } | null> {
+  if (before === null) return null;
+  const after = await gitSnapshot(workdir);
+  if (!after || after.tree === before.tree) return { files: [], patch: "" };
+  // -M so a pure rename reads as its destination path, not as a delete-plus-
+  // add pair — the path that actually exists on disk is the useful one.
+  const files = (await Bun.$`git diff --name-only -M ${before.tree} ${after.tree}`
+    .cwd(workdir).quiet().text())
+    .split("\n").filter(Boolean).sort();
+  const patch = await Bun.$`git diff -M ${before.tree} ${after.tree}`
+    .cwd(workdir).quiet().text();
+  return { files, patch };
 }

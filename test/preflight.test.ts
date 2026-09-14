@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync, mkdirSync, statSync, chmodSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  assertProviderHasModel, lockPaths, unlockPaths, gitSnapshot, gitChangedSince,
+  assertProviderHasModel, lockPaths, unlockPaths, gitSnapshot, gitDiffSince,
 } from "../src/preflight.ts";
 
 // Real `omp models` output: a box-drawn table per provider. Captured from an
@@ -104,21 +104,48 @@ test("git snapshot and diff report only what the run changed", async () => {
   await Bun.$`git -c user.email=t@t -c user.name=t commit -qm init`.cwd(dir);
   const before = await gitSnapshot(dir);
   writeFileSync(join(dir, "new.md"), "x");
-  const changed = await gitChangedSince(dir, before);
-  expect(changed).toEqual(["new.md"]);
+  const d = await gitDiffSince(dir, before);
+  expect(d!.files).toEqual(["new.md"]);
+  expect(d!.patch).toContain("+x");
+});
+
+test("the diff sees an edit to a file that was already dirty at run start", async () => {
+  const dir = fixture();
+  await Bun.$`git init -q`.cwd(dir);
+  writeFileSync(join(dir, "dirty.md"), "one\n");
+  await Bun.$`git add -A`.cwd(dir);
+  await Bun.$`git -c user.email=t@t -c user.name=t commit -qm init`.cwd(dir);
+  writeFileSync(join(dir, "dirty.md"), "one\ntwo\n");    // dirty BEFORE the run
+  const before = await gitSnapshot(dir);
+  writeFileSync(join(dir, "dirty.md"), "one\ntwo\nthree\n");  // the run's edit
+  const d = await gitDiffSince(dir, before);
+  expect(d!.files).toEqual(["dirty.md"]);
+  expect(d!.patch).toContain("+three");
+  // the pre-run edit must not be attributed to the run
+  expect(d!.patch).not.toContain("+two");
 });
 
 test("git snapshot returns null outside a repo", async () => {
   expect(await gitSnapshot(fixture())).toBeNull();
 });
 
-test("gitChangedSince reports a rename's destination path, not the raw porcelain line", async () => {
+test("an unchanged tree diffs to nothing", async () => {
+  const dir = fixture();
+  await Bun.$`git init -q`.cwd(dir);
+  await Bun.$`git add -A`.cwd(dir);
+  await Bun.$`git -c user.email=t@t -c user.name=t commit -qm init`.cwd(dir);
+  const before = await gitSnapshot(dir);
+  const d = await gitDiffSince(dir, before);
+  expect(d).toEqual({ files: [], patch: "" });
+});
+
+test("a rename reports its destination path", async () => {
   const dir = fixture();
   await Bun.$`git init -q`.cwd(dir);
   await Bun.$`git add -A`.cwd(dir);
   await Bun.$`git -c user.email=t@t -c user.name=t commit -qm init`.cwd(dir);
   const before = await gitSnapshot(dir);
   await Bun.$`git mv raw/a.txt raw/b.txt`.cwd(dir);
-  const changed = await gitChangedSince(dir, before);
-  expect(changed).toEqual(["raw/b.txt"]);
+  const d = await gitDiffSince(dir, before);
+  expect(d!.files).toEqual(["raw/b.txt"]);
 });

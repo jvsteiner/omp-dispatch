@@ -2,14 +2,16 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { RpcClient, type RpcAgentProcess } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
 import {
-  type RunResult, emptyResult, writeResult, appendProgress,
+  type RunResult, emptyResult, writeResult, appendProgress, writeDiff,
 } from "./rundir.ts";
+import { lockPaths, unlockPaths, gitSnapshot, gitDiffSince } from "./preflight.ts";
 import { newCapState, countTurn, breach, type Caps } from "./caps.ts";
-import { lockPaths, unlockPaths, gitSnapshot, gitChangedSince } from "./preflight.ts";
 import { createAskSupervisor } from "./asktool.ts";
 
 export interface RunOptions {
   prompt: string;
+  /** The dispatch-chosen name, persisted into result.json for disk readers. */
+  name?: string;
   /** Already resolved by src/models.ts — `provider/id`, or a bare id. */
   model: string;
   workdir: string;
@@ -127,6 +129,7 @@ export async function startRun(
   runId: string,
 ): Promise<RunHandle> {
   const result = emptyResult(runId);
+  result.name = opts.name ?? null;
   const readonly = opts.readonly ?? [];
   const caps: Caps = {
     maxTurns: opts.maxTurns, maxUsd: opts.maxUsd, maxSeconds: opts.maxSeconds,
@@ -169,7 +172,7 @@ export async function startRun(
   } catch (e) {
     appendProgress(runDir, `ERROR failed to lock paths: ${String(e)}`);
     await unlockPaths(opts.workdir, readonly).catch(() => {});
-    result.files_changed = await gitChangedSince(opts.workdir, before).catch(() => []);
+    result.files_changed = (await gitDiffSince(opts.workdir, before).catch(() => null))?.files ?? [];
     result.stopped_because = "error";
     result.state = "error";
     writeResult(runDir, result);
@@ -423,8 +426,10 @@ export async function startRun(
         unlockError = e;
       }
       let gitError: unknown;
+      let diff: { files: string[]; patch: string } | null = null;
       try {
-        result.files_changed = await gitChangedSince(opts.workdir, before);
+        diff = await gitDiffSince(opts.workdir, before);
+        result.files_changed = diff?.files ?? [];
       } catch (e) {
         gitError = e;
       }
@@ -459,6 +464,11 @@ export async function startRun(
           appendProgress(runDir, `ERROR failed to compute files_changed: ${String(gitError)}`);
         }
       } catch { /* a lost log line must not become an unhandled rejection */ }
+      // The diff is the review surface a supervisor reads instead of running
+      // git itself; a write failure must not lose the log lines above.
+      if (diff?.patch) {
+        try { writeDiff(runDir, diff.patch); } catch { /* best effort */ }
+      }
     } finally {
       // settled(result) and a best-effort write/log must happen regardless of
       // what threw above — an unhandled throw here would leave `settled` (and

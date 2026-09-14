@@ -13,6 +13,8 @@ export type StoppedBecause =
 
 export interface RunResult {
   run_id: string;
+  /** The dispatch-chosen name (MCP registry key or CLI name); null for old runs. */
+  name: string | null;
   state: RunState;
   stopped_because: StoppedBecause;
   turns: number;
@@ -65,7 +67,7 @@ export function createRunDir(workdir: string, runId: string): string {
 
 export function emptyResult(runId: string): RunResult {
   return {
-    run_id: runId, state: "running", stopped_because: null,
+    run_id: runId, name: null, state: "running", stopped_because: null,
     turns: 0, tool_calls: 0, cost_usd: 0, seconds: 0,
     model: null, session_file: null, files_changed: [], last_reply: null, ask: null,
   };
@@ -82,6 +84,14 @@ export function writeResult(runDir: string, r: RunResult): void {
 
 export function readResult(runDir: string): RunResult {
   return JSON.parse(readFileSync(join(runDir, "result.json"), "utf8")) as RunResult;
+}
+
+export interface RunListing {
+  runId: string;
+  dir: string;
+  result: RunResult;
+  alive: boolean;
+  readable: boolean;
 }
 
 export function isAlive(runDir: string): boolean {
@@ -129,6 +139,31 @@ export function appendProgress(runDir: string, line: string): void {
   const startedAt = statSync(runDir).birthtimeMs;
   const secs = Math.round((Date.now() - startedAt) / 1000);
   appendFileSync(join(runDir, "progress.log"), `[${String(secs).padStart(4)}s] ${line}\n`);
+}
+
+/**
+ * The git diff of what a run changed, written next to result.json so a
+ * supervisor can review the work without running git (or spending an
+ * approval) itself. Bounded: a generated-file landslide must not turn every
+ * run directory into megabytes.
+ */
+const DIFF_LIMIT = 256 * 1024;
+
+export function writeDiff(runDir: string, patch: string): void {
+  if (!patch) return;
+  const bounded = patch.length > DIFF_LIMIT
+    ? patch.slice(0, DIFF_LIMIT) + "\n[diff truncated at 256KB]\n"
+    : patch;
+  writeFileSync(join(runDir, "diff.patch"), bounded);
+}
+
+/** The run's diff.patch, or null when the run changed nothing (or never wrote one). */
+export function readDiff(runDir: string): string | null {
+  try {
+    return readFileSync(join(runDir, "diff.patch"), "utf8");
+  } catch {
+    return null;
+  }
 }
 
 /**

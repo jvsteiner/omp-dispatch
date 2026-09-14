@@ -33,8 +33,10 @@ and points to the repository root. Codex selects `.codex-plugin/plugin.json`;
 Claude Code selects `.claude-plugin/plugin.json`. Both load the same skill and
 launcher, but they address it differently, and the difference is load-bearing:
 Codex expands no variables at all (verified against its binary — there is no
-`${...}` support), so its `.mcp.json` names the launcher RELATIVE TO THE
-PLUGIN ROOT (`./bin/server.ts`). Claude Code does expand
+`${...}` support). Its `.mcp.json` anchors the launch with `"cwd": "./"` —
+resolved against the plugin root at load time — and names the launcher
+relative to that cwd (`bin/server.ts`). Args alone are process-cwd-relative,
+which only works by accident inside a checkout of this repo. Claude Code does expand
 `${CLAUDE_PLUGIN_ROOT}`, but only inside its own plugin manifest, which is why
 the Claude manifest carries the variable inline and the shared file does not.
 Working in a checkout of this repo, Claude Code may offer the root `.mcp.json`

@@ -1,6 +1,6 @@
 {
   "name": "omp-dispatch",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "description": "Delegate Codex work to external omp agents using configurable providers and models.",
   "author": {
     "name": "Jamie Steiner"

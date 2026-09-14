@@ -20,19 +20,21 @@ test("Codex and Claude packages share the version, skill and dependency-installi
   expect(existsSync(join(root, relative))).toBe(true);
 });
 
-test("the two hosts' launch contracts both hold: relative .mcp.json for Codex, inline variable for Claude", () => {
-  // Codex (verified against its binary: no ${...} expansion exists, and its
-  // plugin validator pins the mcpServers contract to exactly ".mcp.json")
-  // resolves plugin MCP args RELATIVE TO THE PLUGIN ROOT. A variable path
-  // here is what kept every Codex session on the CLI fallback — bun received
-  // the literal "${CLAUDE_PLUGIN_ROOT}/bin/server.ts" and died.
+test("the two hosts' launch contracts both hold: cwd-anchored .mcp.json for Codex, inline variable for Claude", () => {
+  // Codex (verified against its binary and by reproduction) expands no
+  // ${...} variables, pins the mcpServers contract to exactly ".mcp.json",
+  // and resolves the server's cwd field against the PLUGIN ROOT at load
+  // time — while args resolve against the *process* cwd. So the anchor is
+  // the cwd field, and the args must be relative to IT: "cwd": "./" +
+  // "bin/server.ts". A bare relative arg (0.2.5) only worked in a checkout
+  // of this very repo, because the repo happened to contain the path.
   const codex = JSON.parse(readFileSync(join(root, ".codex-plugin/plugin.json"), "utf8"));
   expect(codex.mcpServers).toBe("./.mcp.json");
   const mcp = JSON.parse(readFileSync(join(root, ".mcp.json"), "utf8"));
   const entry = mcp.mcpServers["omp-dispatch"];
+  expect(entry.cwd).toBe("./");
   expect(entry.args.join(" ")).not.toContain("${");
-  expect(entry.args[0]).toMatch(/^\.\//);       // relative to the plugin root
-
+  expect(existsSync(join(root, entry.cwd, entry.args[0]))).toBe(true);
   // Claude Code expands ${CLAUDE_PLUGIN_ROOT} in its own inline plugin
   // manifest — the one place the variable is actually supported — and its
   // plugin cache is never a project root, so the variable is correct there.

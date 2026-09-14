@@ -326,7 +326,7 @@ export function createServer(opts: CreateServerOptions = {}): McpServer {
         const done = track(runName, finish());
         if (run_in_background) {
           return { content: [{ type: "text", text:
-            `Started '${runName}' model=${resolvedModel} ` +
+            `Started '${runName}' model=${model && model !== resolvedModel ? `${model}→${resolvedModel}` : resolvedModel} ` +
             `max_turns=${caps.maxTurns} max_usd=${caps.maxUsd.toFixed(2)} ` +
             `max_seconds=${caps.maxSeconds}.\n` +
             `Collect with omp_task_output({name: ${JSON.stringify(runName)}, wait_seconds: 25}). ` +

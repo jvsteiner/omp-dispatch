@@ -106,10 +106,13 @@ not imported. Unsupported required tools are refused explicitly.
 ## Check results
 
 Read `stopped_because`: `completed` is completion; caps, aborts and errors mean
-the work may be partial. `no_response` means the provider never answered the
-first prompt (an intermittent hang, seen with `deepseek/deepseek-flash`): the
-run spent nothing and changed nothing — redispatch as-is, or on a different
-tier if it repeats. Read the diff — `include_diff: true` on
+the work may be partial. `no_response` means the provider sent nothing at all
+after the prompt — not even a reasoning frame (a provider outage, seen with
+`deepseek/deepseek-flash`); the run spent ~nothing and changed nothing, so
+redispatch as-is or on a different tier. Long initial reasoning is normal and
+NOT a stall: frames stream (progress shows `FIRST FRAME`, and heartbeats carry
+`last_frame=`), cost accrues with `turns=0` for minutes on some models — keep
+waiting while `last_frame` stays near zero. Read the diff — `include_diff: true` on
 `omp_task_output`, or `diff.patch` in the run directory — and run relevant
 checks before accepting an agent's claims. Git-derived `files_changed` is in
 the run's `result.json` and the report footer.

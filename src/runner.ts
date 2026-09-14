@@ -347,6 +347,11 @@ export async function startRun(
   // The first-response watchdog's timer — see where it is armed, after the
   // prompt is submitted, for why it exists and what it must not fire on.
   let firstResponse: ReturnType<typeof setTimeout> | undefined;
+  // Liveness bookkeeping: when the last session frame arrived, and whether
+  // the first one has been logged. A frame is ANY event the agent emits —
+  // thinking deltas included.
+  let lastFrameAt = 0;
+  let sawFirstFrame = false;
 
   /**
    * Named so a resumed run can arm a second poll after the first was cleared
@@ -361,12 +366,15 @@ export async function startRun(
       void (async () => {
         const ok = await refreshStats();
         if (finishing || !ok) return;
-        // A long single turn emits no tool_start and no agent_end, so the
-        // log goes quiet for its whole duration. A cost heartbeat when the
-        // number has MOVED (never a fixed-cadence line — a stuck agent must
-        // still look stuck) is the difference between "working" and "hung".
+        // A long single turn emits no agent_end, so the log goes quiet for
+        // its whole duration. A cost heartbeat when the number has MOVED
+        // (never a fixed-cadence line — a stuck agent must still look stuck)
+        // is the difference between "working" and "hung"; last_frame backs it
+        // with the stronger signal — age of the newest session frame, which
+        // stays near zero while tokens stream even when no turn has landed.
         if (state.costUsd > lastHeartbeatCost + 1e-9) {
-          appendProgress(runDir, `heartbeat turns=${state.turns} $${state.costUsd.toFixed(4)}`);
+          appendProgress(runDir, `heartbeat turns=${state.turns} $${state.costUsd.toFixed(4)}` +
+            ` last_frame=${Math.max(0, Math.round((Date.now() - lastFrameAt) / 1000))}s`);
           lastHeartbeatCost = state.costUsd;
         }
         const b = breach(state, caps);
@@ -550,10 +558,21 @@ export async function startRun(
     }
 
     const ev = event.assistantMessageEvent;
-      // Any frame from the agent — a tool call starting, or any agent_end,
-      // terminal or not — is proof the provider answered, and the
-      // first-response watchdog armed below has done its one job.
-      if (ev?.type === "tool_start" || event.type === "agent_end") {
+      // ANY frame from the agent — a thinking delta, a tool call starting,
+      // any agent_end — is provider liveness, and the first-response watchdog
+      // armed below has done its one job. 0.3.1 cleared only on tool_start /
+      // agent_end, which killed healthy runs: deepseek-v4-pro routinely
+      // reasons for four-plus minutes before its first tool call on a real
+      // brief, streaming frames the whole time (see the sif runs of
+      // 2026-09-14, both executing at $0.03 mid-reasoning). A true wedge —
+      // the deepseek-flash outage — emits NOTHING, which is exactly what the
+      // watchdog remains for.
+      if (!finishing) {
+        lastFrameAt = Date.now();
+        if (!sawFirstFrame) {
+          sawFirstFrame = true;
+          appendProgress(runDir, `FIRST FRAME ${ev?.type ?? event.type} — provider responding`);
+        }
         clearTimeout(firstResponse);
       }
       if (ev?.type === "tool_start") {
@@ -646,6 +665,7 @@ export async function startRun(
       // supervisor's first poll used to land and see nothing but "running".
       // This line says the brief is in flight, not still connecting.
       appendProgress(runDir, `PROMPT submitted (${opts.prompt.length} chars)`);
+      lastFrameAt = Date.now();
 
       // First-response watchdog, armed the moment the brief is in flight. A
       // provider hang looks like this from here: the prompt was accepted,

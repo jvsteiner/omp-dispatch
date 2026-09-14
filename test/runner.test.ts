@@ -298,6 +298,27 @@ test("the first-response watchdog stands down once the agent responds", async ()
   }
 }, 30_000);
 
+// The wild failure of 0.3.1: deepseek-v4-pro reasoning 4+ minutes before
+// its first tool call, frames streaming the whole time, cost accruing —
+// killed at 240s as "no model response" because the watchdog only cleared
+// on tool_start/agent_end. Reasoning frames must count as liveness.
+test("a long first turn that streams reasoning frames is not killed by the watchdog", async () => {
+  process.env.OMP_DISPATCH_DEAD_AIR_MS = "200";
+  try {
+    // No tool_start and no agent_end until 600ms in — well past the 200ms
+    // window — but a thinking_delta frame arrives immediately.
+    const s = setup({ streamOnlyMs: 600 });
+    const r = await runToSettled(s);
+    expect(r.state).toBe("completed");
+    expect(r.stopped_because).toBe("completed");
+    const log = readFileSync(join(s.runDir, "progress.log"), "utf8");
+    expect(log).toContain("FIRST FRAME");
+    expect(log).not.toContain("no_response");
+  } finally {
+    delete process.env.OMP_DISPATCH_DEAD_AIR_MS;
+  }
+}, 30_000);
+
 // CARRY-OVER 6. unlockPaths and gitChangedSince can both genuinely throw (a
 // chmod failure, `git status` failing) — the tail of finish() must not let
 // either throw skip settled(result) or leave the run stuck at

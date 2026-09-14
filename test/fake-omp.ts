@@ -7,7 +7,8 @@
  *   { turnCostUsd, toolCallsPerTurn, replies: string[],
  *     nonTerminalFirst: boolean, askOnTurn: number | null,
  *     turnDelayMs: number, crashAfterPrompt: boolean, readyDelayMs: number,
- *     hangAfterPrompt: boolean, spawnGrandchild: boolean, statsFailAfter: number | null }
+ *     hangAfterPrompt: boolean, streamOnlyMs: number,
+ *     spawnGrandchild: boolean, statsFailAfter: number | null }
  *
  * FAKE_OMP_DUMP, when set, names a path this process writes its own argv,
  * cwd and CLAUDE_CONFIG_DIR to, so a test can assert what the host actually
@@ -32,6 +33,11 @@ const crashAfterPrompt: boolean = script.crashAfterPrompt ?? false;
 // alive — RPC keeps answering (get_session_stats included), exactly like a
 // real omp whose provider call wedged — but no agent_end ever comes.
 const hangAfterPrompt: boolean = script.hangAfterPrompt ?? false;
+// Simulates a long first-turn reasoning phase: frames stream (thinking
+// deltas), but no tool_start and no agent_end until the delay elapses — the
+// exact shape 0.3.1's watchdog killed in the wild (deepseek-v4-pro reasoning
+// 4+ minutes before its first tool call, streaming the whole time).
+const streamOnlyMs: number = script.streamOnlyMs ?? 0;
 // Delays the initial ready frame, so a test can act (e.g. send a signal)
 // while a host's client.start() is still genuinely pending.
 const readyDelayMs: number = script.readyDelayMs ?? 0;
@@ -92,6 +98,18 @@ function stats() {
 async function runTurn() {
   turns += 1;
   out({ type: "agent_start" });
+
+  if (streamOnlyMs > 0 && turns === 1) {
+    out({
+      type: "message_update",
+      assistantMessageEvent: { type: "thinking_delta", text: "reasoning..." },
+      message: { role: "assistant", content: [] },
+    });
+    await Bun.sleep(streamOnlyMs);
+    // falls through: tool frames and the terminal agent_end arrive after the
+    // long reasoning window.
+  }
+
 
   if (askOnTurn === turns && hostTools.some(t => t.name === "ask_supervisor")) {
     out({

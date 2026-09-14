@@ -89,7 +89,7 @@ test("a tier resolves through the map and the resolved id is echoed in the ack",
   const text = r.content[0].text as string;
   // 'opus' is the caller's word; the ack reports the user's model behind it,
   // so a wrong mapping is catchable at t=0.
-  expect(text).toMatch(/model=zai\/glm-5\.3 /);
+  expect(text).toMatch(/model=opus→zai\/glm-5\.3 /);
   await call(c, "omp_task_output", { name: "explicit", wait_seconds: 5 });
 });
 

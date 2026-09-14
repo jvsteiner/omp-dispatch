@@ -23,9 +23,15 @@ export interface RunOptions {
   systemPrompt?: string;
   /** Paths under workdir to make read-only for the run. Off by default. */
   readonly?: string[];
-  /** Override the agent launcher. Tests point this at test/fake-omp.ts. */
-  command?: string[];
-  env?: Record<string, string>;
+  /** The agent definition's body, appended to omp's own system prompt. */
+  systemPrompt?: string;
+  /**
+   * Resume a saved omp conversation instead of starting a new one — the
+   * durability path: omp_send_message on a completed on-disk run after a
+   * server restart spawns a fresh agent with `--resume=<session file>`, so
+   * the conversation continues with full context in a new process.
+   */
+  resumeSessionFile?: string;
 }
 
 export interface RunHandle {
@@ -94,9 +100,10 @@ const TERMINATION_GRACE_MS = 2_000;
  * against the argv, without spawning anything.
  */
 export function buildOmpArgs(
-  opts: Pick<RunOptions, "tools" | "systemPrompt" | "maxSeconds">,
+  opts: Pick<RunOptions, "tools" | "systemPrompt" | "maxSeconds" | "resumeSessionFile">,
 ): string[] {
   return [
+    ...(opts.resumeSessionFile ? [`--resume=${opts.resumeSessionFile}`] : []),
     `--tools=${opts.tools}`,
     ...(opts.systemPrompt ? [`--append-system-prompt=${opts.systemPrompt}`] : []),
     // --no-skills, --no-rules and --no-extensions are deliberately NOT here.
@@ -344,14 +351,15 @@ export async function startRun(
   let unsubscribeEvents: (() => void) | undefined;
   let wallClock: ReturnType<typeof setTimeout> | undefined;
   let costPoll: ReturnType<typeof setInterval> | undefined;
-  // The first-response watchdog's timer — see where it is armed, after the
-  // prompt is submitted, for why it exists and what it must not fire on.
-  let firstResponse: ReturnType<typeof setTimeout> | undefined;
-  // Liveness bookkeeping: when the last session frame arrived, and whether
-  // the first one has been logged. A frame is ANY event the agent emits —
-  // thinking deltas included.
-  let lastFrameAt = 0;
+  // Liveness bookkeeping for the continuous dead-air watchdog (checked in
+  // the cost poll): when activity last happened — a session frame OR a cost
+  // movement, whichever is newer — whether the first frame has been logged,
+  // and what kind of event the newest one was. The kind matters because
+  // `tool_execution_start`/`tool_execution_update` mean a tool is genuinely
+  // executing: a silent `cargo test` is not a wedge, however long it runs.
+  let lastActivityAt = 0;
   let sawFirstFrame = false;
+  let lastEventKind = "";
 
   /**
    * Named so a resumed run can arm a second poll after the first was cleared
@@ -370,17 +378,44 @@ export async function startRun(
         // its whole duration. A cost heartbeat when the number has MOVED
         // (never a fixed-cadence line — a stuck agent must still look stuck)
         // is the difference between "working" and "hung"; last_frame backs it
-        // with the stronger signal — age of the newest session frame, which
-        // stays near zero while tokens stream even when no turn has landed.
+        // with the stronger signal — age of the newest activity, which stays
+        // near zero while tokens stream even when no turn has landed.
         if (state.costUsd > lastHeartbeatCost + 1e-9) {
           appendProgress(runDir, `heartbeat turns=${state.turns} $${state.costUsd.toFixed(4)}` +
-            ` last_frame=${Math.max(0, Math.round((Date.now() - lastFrameAt) / 1000))}s`);
+            ` last_frame=${Math.max(0, Math.round((Date.now() - lastActivityAt) / 1000))}s`);
           lastHeartbeatCost = state.costUsd;
         }
         const b = breach(state, caps);
         if (b) {
           appendProgress(runDir, `POLL breach detected mid-turn: ${b} ($${state.costUsd.toFixed(4)})`);
           await finish(b);
+          return;
+        }
+        // Continuous dead-air watchdog — the successor to 0.3.1's one-shot
+        // first-response timer, covering MID-RUN wedges too (a provider
+        // stream can stall after healthy turns; the sif retries of
+        // 2026-09-14 froze mid-reasoning and needed manual stops). Liveness
+        // is any session frame or cost movement. Two deliberate exemptions:
+        // a tool genuinely executing (`tool_execution_start`/`_update` — a
+        // silent `cargo test` is not a wedge however long it runs; its
+        // `tool_execution_end` resumes the clock), and a parked
+        // ask_supervisor question (a wait on us, not the provider).
+        const deadAirMs = Number(process.env.OMP_DISPATCH_DEAD_AIR_MS) || 240_000;
+        const quietMs = Date.now() - lastActivityAt;
+        const toolInFlight =
+          lastEventKind === "tool_execution_start" || lastEventKind === "tool_execution_update";
+        if (quietMs > deadAirMs && !toolInFlight && asker.pending() === null) {
+          appendProgress(
+            runDir,
+            sawFirstFrame
+              ? `ERROR agent activity stopped ${Math.round(quietMs / 1000)}s ago ` +
+                `(turns=${state.turns}, last event ${lastEventKind || "none"}) — provider stream ` +
+                `stall suspected. Stopping instead of burning the time cap; retry or redispatch.`
+              : `ERROR no model response within ${Math.round(deadAirMs / 1000)}s of the prompt — ` +
+                `provider hang suspected (zero turns, zero tool calls). ` +
+                `Stopping instead of burning the time cap; retry, or dispatch on a different tier.`,
+          );
+          await finish("no_response");
         }
       })();
     }, pollIntervalMs);
@@ -401,7 +436,6 @@ export async function startRun(
     // exact regression untestable.
     clearTimeout(wallClock);
     clearInterval(costPoll);
-    clearTimeout(firstResponse);
 
     let statsError: unknown;
     try {
@@ -519,6 +553,9 @@ export async function startRun(
   async function refreshStats(): Promise<boolean> {
     try {
       const s = await client.getSessionStats();
+      // Cost movement is liveness evidence too — tokens billed while no turn
+      // has landed (long reasoning) keep the dead-air clock honest.
+      if (s.cost > state.costUsd + 1e-9) lastActivityAt = Date.now();
       state.costUsd = s.cost;
       result.cost_usd = s.cost;
       result.tool_calls = s.toolCalls;
@@ -558,22 +595,20 @@ export async function startRun(
     }
 
     const ev = event.assistantMessageEvent;
-      // ANY frame from the agent — a thinking delta, a tool call starting,
-      // any agent_end — is provider liveness, and the first-response watchdog
-      // armed below has done its one job. 0.3.1 cleared only on tool_start /
-      // agent_end, which killed healthy runs: deepseek-v4-pro routinely
-      // reasons for four-plus minutes before its first tool call on a real
-      // brief, streaming frames the whole time (see the sif runs of
-      // 2026-09-14, both executing at $0.03 mid-reasoning). A true wedge —
-      // the deepseek-flash outage — emits NOTHING, which is exactly what the
-      // watchdog remains for.
+      // ANY frame from the agent — a thinking delta, a tool call's arguments
+      // streaming, tool execution updates, any agent_end — is liveness, and
+      // pushes the dead-air clock. 0.3.1's watchdog cleared only on
+      // tool_start/agent_end and killed healthy runs: deepseek-v4-pro
+      // routinely reasons for four-plus minutes before its first tool call
+      // on a real brief, streaming frames the whole time (the sif runs of
+      // 2026-09-14, both executed at $0.03 mid-reasoning).
       if (!finishing) {
-        lastFrameAt = Date.now();
+        lastActivityAt = Date.now();
+        lastEventKind = ev ? `ame:${ev.type}` : String(event.type);
         if (!sawFirstFrame) {
           sawFirstFrame = true;
           appendProgress(runDir, `FIRST FRAME ${ev?.type ?? event.type} — provider responding`);
         }
-        clearTimeout(firstResponse);
       }
       if (ev?.type === "tool_start") {
         appendProgress(runDir, `${ev.name} ${String(JSON.stringify(ev.input ?? "")).slice(0, 70)}`);
@@ -659,36 +694,16 @@ export async function startRun(
       result.model = st.model ? { provider: st.model.provider, id: st.model.id } : null;
       result.session_file = st.sessionFile ?? null;
       writeResult(runDir, result);
-      appendProgress(runDir, `START ${opts.model}`);
+      appendProgress(runDir, `START ${opts.model}` +
+        (opts.resumeSessionFile ? " (resuming a saved conversation)" : ""));
       await client.prompt(opts.prompt);
       // The gap between START and the first tool_start is exactly where a
       // supervisor's first poll used to land and see nothing but "running".
       // This line says the brief is in flight, not still connecting.
       appendProgress(runDir, `PROMPT submitted (${opts.prompt.length} chars)`);
-      lastFrameAt = Date.now();
-
-      // First-response watchdog, armed the moment the brief is in flight. A
-      // provider hang looks like this from here: the prompt was accepted,
-      // then nothing — zero turns, zero tool calls, $0 — while omp's own RPC
-      // channel stays healthy, so the stats poll keeps succeeding and nothing
-      // else notices; the run drifts to the max_seconds wall clock (twenty
-      // minutes of silent dead air on the default caps). Seen in the wild as
-      // an intermittent deepseek-flash failure. Deliberately bounds only the
-      // FIRST response: an agent that has answered once is bounded by the
-      // turn/budget/time caps, and a pending supervisor question is a wait on
-      // us, not the provider. Read per run, like OMP_DISPATCH_POLL_MS, so a
-      // test can shrink it without a module-load-time freeze.
-      const deadAirMs = Number(process.env.OMP_DISPATCH_DEAD_AIR_MS) || 240_000;
-      firstResponse = setTimeout(() => {
-        if (finishing) return;
-        appendProgress(
-          runDir,
-          `ERROR no model response within ${Math.round(deadAirMs / 1000)}s of the prompt — ` +
-          `provider hang suspected (zero turns, zero tool calls). ` +
-          `Stopping instead of burning the time cap; retry, or dispatch on a different tier.`,
-        );
-        void finish("no_response");
-      }, deadAirMs);
+      // The dead-air clock starts here; the cost poll (armed above) is what
+      // checks it. Frames or cost movement keep pushing it forward; see the
+      // watchdog block inside armCostPoll for what counts and what is exempt.
     }
   } catch (e) {
     if (!finishing) {

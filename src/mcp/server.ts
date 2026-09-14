@@ -13,7 +13,7 @@ import {
 import { runDiagnostics } from "../doctor.ts";
 import { readDiff } from "../rundir.ts";
 import type { AgentDef } from "../agentdef.ts";
-import { newRunId, createRunDir, pruneRuns } from "../rundir.ts";
+import { newRunId, createRunDir, pruneRuns, findDiskRuns, type DiskRun } from "../rundir.ts";
 import { createRegistry, uniqueName, type RunRegistry } from "./runs.ts";
 import { createWorktree, type Worktree } from "../worktree.ts";
 
@@ -350,42 +350,148 @@ export function createServer(opts: CreateServerOptions = {}): McpServer {
   // the caller has just mistyped a name it will have to get right to continue,
   // and a bare "not found" makes it guess.
 
+  // The registry dies with the server; result.json does not. Any run that
+  // ever settled is still findable on disk, and — beyond reading — a
+  // COMPLETED one can be resumed into a fresh omp process (see
+  // omp_send_message), which is what makes a server restart survivable.
+  const diskRun = (name: string): DiskRun | undefined =>
+    findDiskRuns().find(d => d.name === name);
+
   const mustFind = (name: string, tool: string) => {
     const handle = registry.get(name);
     if (!handle) {
       const known = registry.list().map(r => r.name).sort();
+      const onDisk = findDiskRuns()
+        .filter(d => !known.includes(d.name))
+        .map(d => d.name);
       throw new Error(
-        `${tool}: no run named '${name}'. ` +
-          (known.length ? `Running or finished: ${known.join(", ")}.` : `No runs yet.`),
+        `${tool}: no live run named '${name}'. ` +
+          (known.length ? `Running or finished: ${known.join(", ")}.` : `No runs in this session.`) +
+          (onDisk.length ? ` On disk (readable via omp_task_output; completed ones resumable via omp_send_message): ${onDisk.join(", ")}.` : ""),
       );
     }
     return handle;
+  };
+
+  // A settled run read from disk after a restart (or started by the CLI).
+  // Live-only surfaces (steer, answer) stay live-only; this is reading and,
+  // for completed runs, resuming.
+  const diskReply = (disk: DiskRun, includeDiff: boolean): Reply => {
+    const r = disk.result;
+    const footer = resultFooter(disk.name, r, { runDir: disk.dir });
+    const stale = r.state === "running"
+      ? `\n(This run was in flight when its server went away — the agent process died with it. ` +
+        `Its artifacts are readable; a completed run can be continued with omp_send_message.)`
+      : `\n(on-disk run ${disk.runId} — server restarted or CLI-started. ` +
+        `Completed on-disk runs continue with omp_send_message, passing the run's workdir.)`;
+    const diff = includeDiff ? readDiff(disk.dir) : null;
+    const diffText = includeDiff
+      ? (diff ? `\n\n--- diff (git-derived, vs run start) ---\n${diff}` : "\n\n(no file changes — no diff was written)")
+      : "";
+    return { content: [{ type: "text", text: (r.last_reply ?? "(no reply)") + footer + stale + diffText }] };
   };
 
   server.tool(
     "omp_send_message",
     "Continue a run with a follow-up, keeping its context — the omp equivalent of " +
       "SendMessage. Works on a run that has already finished: it is resumed rather than " +
-      "restarted. A run that stopped for any other reason (a cap, an abort, an error) " +
+      "restarted — including an on-disk run from BEFORE a server restart, which is " +
+      "resumed into a fresh agent with its session intact (pass the run's workdir). " +
+      "A run that stopped for any other reason (a cap, an abort, an error) " +
       "refuses, naming the reason. Blocks until the new turn settles and returns its reply.",
     {
       to: z.string().describe("The run's name, as returned by omp_agent or omp_list_agents."),
       message: z.string().describe("The follow-up to send."),
+      workdir: z.string().optional().describe(
+        "Absolute project path. Required when resuming an on-disk run (run dirs are " +
+        "hash-keyed, so the workdir cannot be recovered from the name alone).",
+      ),
       run_in_background: z.boolean().optional().describe("Return immediately; collect with omp_task_output. Recommended for Codex."),
     },
-    async ({ to, message, run_in_background }) => {
-      const handle = mustFind(to, "omp_send_message");
+    async ({ to, message, workdir, run_in_background }) => {
       if (operations.has(to) && !operations.get(to)!.reply) {
         throw new Error(`omp_send_message: run '${to}' is still active; use omp_steer or wait for its result.`);
       }
+      let handle = registry.get(to);
+      let resumedFromDisk = false;
+      if (!handle) {
+        const disk = diskRun(to);
+        if (!disk) {
+          mustFind(to, "omp_send_message");   // throws with the full listing
+          return;                             // unreachable; for the type checker
+        }
+        const r = disk.result;
+        if (r.state !== "completed") {
+          throw new Error(
+            `omp_send_message: on-disk run '${to}' stopped because ${r.stopped_because ?? r.state} — ` +
+            `only a completed run can be resumed.`,
+          );
+        }
+        if (!r.session_file) {
+          throw new Error(`omp_send_message: on-disk run '${to}' recorded no session file — cannot resume.`);
+        }
+        if (!workdir) {
+          throw new Error(
+            `omp_send_message: resuming on-disk run '${to}' requires its workdir — ` +
+            `retry with workdir set to the absolute project path it ran in.`,
+          );
+        }
+        if (isTaken(to)) {
+          throw new Error(`omp_send_message: the name '${to}' is already in use.`);
+        }
+        reserved.add(to);
+        try {
+          // Same run directory, same name, same conversation: a fresh omp
+          // process resumes the recorded session. The model is whatever the
+          // run itself last reported; caps re-arm fresh while turns and cost
+          // stay cumulative (getSessionStats reads the resumed session).
+          const model = r.model ? `${r.model.provider}/${r.model.id}` : undefined;
+          handle = await startRun(
+            {
+              prompt: message,
+              name: to,
+              ...model ? { model } : {},
+              workdir,
+              tools: AGENT_DEFAULTS.tools,
+              maxTurns: AGENT_DEFAULTS.maxTurns,
+              maxUsd: AGENT_DEFAULTS.maxUsd,
+              maxSeconds: AGENT_DEFAULTS.maxSeconds,
+              env: loadProviderKeys(),
+              command: opts.command,
+              resumeSessionFile: r.session_file,
+            },
+            disk.dir,
+            disk.runId,
+          );
+          registry.add(to, handle);
+          resumedFromDisk = true;
+        } finally {
+          reserved.delete(to);
+        }
+      }
+      const liveHandle = handle;
       const finish = async (): Promise<Reply> => {
-        const reply = await handle.say(message);
-        const footer = resultFooter(to, handle.result, { runDir: handle.runDir });
+        if (resumedFromDisk) {
+          const r = await liveHandle.settled;
+          if (r.state === "error") {
+            throw new Error(
+              `omp_send_message: resumed run '${to}' did not complete: ${r.stopped_because}. ` +
+              `See ${liveHandle.runDir}/progress.log for details.`,
+            );
+          }
+          const footer = resultFooter(to, r, { runDir: liveHandle.runDir });
+          return { content: [{ type: "text", text: (r.last_reply ?? "(no reply)") + footer }] };
+        }
+        const reply = await liveHandle.say(message);
+        const footer = resultFooter(to, liveHandle.result, { runDir: liveHandle.runDir });
         return { content: [{ type: "text", text: (reply || "(no reply)") + footer }] };
       };
       const done = track(to, finish());
       if (run_in_background) {
-        return { content: [{ type: "text", text: `Continuing '${to}'. Collect with omp_task_output.` }] };
+        return { content: [{ type: "text", text:
+          resumedFromDisk
+            ? `Resumed '${to}' from its saved session. Collect with omp_task_output.`
+            : `Continuing '${to}'. Collect with omp_task_output.` }] };
       }
       return await done;
     },
@@ -408,19 +514,27 @@ export function createServer(opts: CreateServerOptions = {}): McpServer {
   server.tool(
     "omp_list_agents",
     "List every omp run this session has started, running or finished, with its state, " +
-      "turns and cost so far.",
+      "turns and cost so far. Settled runs from earlier sessions or CLI starts are " +
+      "listed from disk, marked (on-disk): readable via omp_task_output, and completed " +
+      "ones continuable via omp_send_message with their workdir.",
     {},
     async () => {
       const runs = registry.list();
-      if (runs.length === 0) {
-        return { content: [{ type: "text", text: "No omp agents have run in this session." }] };
-      }
       const lines = runs.map(({ name, handle }) => {
         const r = handle.result;
         return `${name}  ${r.state.padEnd(10)} turns=${r.turns} ` +
           `cost_usd=${r.cost_usd.toFixed(4)} ${r.stopped_because ?? ""}`.trimEnd();
       });
-      return { content: [{ type: "text", text: lines.join("\n") }] };
+      const liveNames = new Set(runs.map(r => r.name));
+      const diskLines = findDiskRuns()
+        .filter(d => !liveNames.has(d.name))
+        .map(d =>
+          `${d.name}  ${d.result.state.padEnd(10)} turns=${d.result.turns} ` +
+          `cost_usd=${d.result.cost_usd.toFixed(4)} ${d.result.stopped_because ?? ""} (on-disk)`.trimEnd());
+      if (lines.length === 0 && diskLines.length === 0) {
+        return { content: [{ type: "text", text: "No omp agents have run in this session." }] };
+      }
+      return { content: [{ type: "text", text: [...lines, ...diskLines].join("\n") }] };
     },
   );
 
@@ -499,6 +613,12 @@ export function createServer(opts: CreateServerOptions = {}): McpServer {
       };
       const operation = operations.get(name);
       if (operation?.reply) return withDiff(operation.reply);
+      // A run from before a restart (or CLI-started): settled artifacts are
+      // on disk even though no live handle exists.
+      if (!registry.has(name)) {
+        const disk = diskRun(name);
+        if (disk) return diskReply(disk, include_diff === true);
+      }
       const handle = mustFind(name, "omp_task_output");
       if (operation && wait_seconds && handle.result.state !== "asking") {
         let timer: ReturnType<typeof setTimeout> | undefined;

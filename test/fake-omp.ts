@@ -33,11 +33,15 @@ const crashAfterPrompt: boolean = script.crashAfterPrompt ?? false;
 // alive — RPC keeps answering (get_session_stats included), exactly like a
 // real omp whose provider call wedged — but no agent_end ever comes.
 const hangAfterPrompt: boolean = script.hangAfterPrompt ?? false;
-// Simulates a long first-turn reasoning phase: frames stream (thinking
-// deltas), but no tool_start and no agent_end until the delay elapses — the
-// exact shape 0.3.1's watchdog killed in the wild (deepseek-v4-pro reasoning
-// 4+ minutes before its first tool call, streaming the whole time).
 const streamOnlyMs: number = script.streamOnlyMs ?? 0;
+// Emulates omp's real tool-execution envelope: frames stop (beyond a start
+// marker) while the tool runs — the shape the dead-air watchdog must treat
+// as tool-in-flight, not a wedge.
+const emitToolExecution: boolean = script.emitToolExecution ?? false;
+// Emulates a mid-run provider stall: turn 1 streams normally up to a
+// non-terminal agent_end, a second message starts (thinking delta), then
+// silence forever — no further frames, process stays alive.
+const wedgeAfterFirstTurn: boolean = script.wedgeAfterFirstTurn ?? false;
 // Delays the initial ready frame, so a test can act (e.g. send a signal)
 // while a host's client.start() is still genuinely pending.
 const readyDelayMs: number = script.readyDelayMs ?? 0;
@@ -100,15 +104,22 @@ async function runTurn() {
   out({ type: "agent_start" });
 
   if (streamOnlyMs > 0 && turns === 1) {
-    out({
-      type: "message_update",
-      assistantMessageEvent: { type: "thinking_delta", text: "reasoning..." },
-      message: { role: "assistant", content: [] },
-    });
-    await Bun.sleep(streamOnlyMs);
+    // Real long reasoning streams CONTINUOUS deltas — not one frame then
+    // silence — and the watchdog must keep standing down for the whole
+    // window because those frames keep arriving.
+    const until = Date.now() + streamOnlyMs;
+    while (Date.now() < until) {
+      out({
+        type: "message_update",
+        assistantMessageEvent: { type: "thinking_delta", text: "reasoning..." },
+        message: { role: "assistant", content: [] },
+      });
+      await Bun.sleep(100);
+    }
     // falls through: tool frames and the terminal agent_end arrive after the
     // long reasoning window.
   }
+
 
 
   if (askOnTurn === turns && hostTools.some(t => t.name === "ask_supervisor")) {
@@ -130,8 +141,19 @@ async function runTurn() {
   }
   cost += turnCostUsd;
 
-  if (turnDelayMs > 0) await Bun.sleep(turnDelayMs);
+  if (wedgeAfterFirstTurn && turns === 1) {
+    out({ type: "agent_end", messages: [], isTerminal: false });
+    out({
+      type: "message_update",
+      assistantMessageEvent: { type: "thinking_delta", text: "second message..." },
+      message: { role: "assistant", content: [] },
+    });
+    return;   // silence forever: the dead-air watchdog's mid-run case
+  }
 
+  if (emitToolExecution) out({ type: "tool_execution_start", toolName: "bash" });
+  if (turnDelayMs > 0) await Bun.sleep(turnDelayMs);
+  if (emitToolExecution) out({ type: "tool_execution_end", toolName: "bash" });
   if (nonTerminalFirst && turns === 1) {
     out({ type: "agent_end", messages: [], isTerminal: false });   // must NOT count
   }

@@ -154,7 +154,14 @@ delegate through this plugin at all.
    directories on disk, the same reports and footers. Steering and answering
    questions need the live MCP server; everything else survives without it.
 
-Runs and continuation handles belong to the current MCP server process.
-Disconnecting stops its child processes; saved artifacts remain under
-`~/.omp-dispatch/runs/` and stay readable through `dispatch output`, but a run
-cannot be resumed by name after a restart.
+## Restarts and durability
+
+A server restart loses only IN-FLIGHT runs (their omp processes die with
+the server). Every settled run survives on disk: `omp_list_agents` lists
+prior-session runs marked `(on-disk)`, `omp_task_output` reads their reports
+and diffs by name, and `omp_send_message` CONTINUES a completed on-disk run —
+its recorded omp session is resumed in a fresh agent with full context; pass
+the run's absolute `workdir`. Steering and answering questions still need the
+run to be live. If the frame stream stalls mid-run (not during tool
+execution) the run settles itself as `no_response` — check `last_frame` in
+the heartbeats, then redispatch or resume.

@@ -78,9 +78,18 @@ test("omp_list_agents reports a settled run with its state and cost", async () =
 }, 40_000);
 
 test("omp_list_agents says so plainly when nothing has run", async () => {
-  const c = await connect();
-  const r = await call(c, "omp_list_agents");
-  expect(r.content[0].text).toMatch(/no .*agents|none/i);
+  // "Nothing" must include the disk: settled runs from earlier tests live
+  // on under this file's fake home, and the listing is honest about them.
+  const isolatedHome = mkdtempSync(join(tmpdir(), "omp-empty-home-"));
+  const prev = process.env.HOME;
+  process.env.HOME = isolatedHome;
+  try {
+    const c = await connect();
+    const r = await call(c, "omp_list_agents");
+    expect(r.content[0].text).toMatch(/no .*agents|none/i);
+  } finally {
+    process.env.HOME = prev;
+  }
 }, 20_000);
 
 // --- a run still in flight ------------------------------------------------

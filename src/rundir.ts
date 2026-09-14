@@ -55,7 +55,7 @@ export function runsRoot(workdir: string): string {
   const base = workdir.replace(/\/+$/, "").split("/").pop() || "root";
   const slug = base.replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 40);
   const hash = createHash("sha256").update(workdir).digest("hex").slice(0, 8);
-  return join(homedir(), ".omp-dispatch", "runs", `${slug}-${hash}`);
+  return join(process.env.HOME ?? homedir(), ".omp-dispatch", "runs", `${slug}-${hash}`);
 }
 export const runDirFor = (workdir: string, runId: string) => join(runsRoot(workdir), runId);
 
@@ -63,6 +63,46 @@ export function createRunDir(workdir: string, runId: string): string {
   const dir = runDirFor(workdir, runId);
   mkdirSync(dir, { recursive: true });
   return dir;
+}
+
+export interface DiskRun {
+  name: string;
+  runId: string;
+  dir: string;
+  result: RunResult;
+}
+
+/**
+ * Every named run on disk, across all project roots — the survival surface
+ * after an MCP server restart or a CLI-started run. The in-memory registry
+ * dies with the server; result.json does not. Newest wins per name (run ids
+ * sort chronologically), and one unreadable run never hides the rest.
+ */
+export function findDiskRuns(): DiskRun[] {
+  const root = join(process.env.HOME ?? homedir(), ".omp-dispatch", "runs");
+  if (!existsSync(root)) return [];
+  const byName = new Map<string, DiskRun>();
+  for (const project of readdirSync(root)) {
+    const pdir = join(root, project);
+    let ids: string[];
+    try {
+      ids = readdirSync(pdir);
+    } catch {
+      continue;
+    }
+    for (const id of ids.sort().reverse()) {
+      const dir = join(pdir, id);
+      try {
+        const result = readResult(dir);
+        if (result.name && !byName.has(result.name)) {
+          byName.set(result.name, { name: result.name, runId: id, dir, result });
+        }
+      } catch {
+        /* unreadable result.json: skip this run, keep the rest visible */
+      }
+    }
+  }
+  return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
 export function emptyResult(runId: string): RunResult {
@@ -187,7 +227,7 @@ const KEEP_PER_PROJECT = 50;
  * can report it.
  */
 export function pruneRuns(
-  root = join(homedir(), ".omp-dispatch", "runs"),
+  root = join(process.env.HOME ?? homedir(), ".omp-dispatch", "runs"),
   now = Date.now(),
 ): { removed: number; freedBytes: number } {
   let removed = 0;

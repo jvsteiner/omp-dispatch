@@ -269,6 +269,7 @@ test("an omp child that dies mid-turn ends the run as an error, not a hang, and 
 // $0. With it, the run fails fast, self-diagnoses, and names the remedy.
 test("a provider hang settles as no_response instead of drifting to the wall clock", async () => {
   process.env.OMP_DISPATCH_DEAD_AIR_MS = "250";
+  process.env.OMP_DISPATCH_POLL_MS = "50";     // the poll is what checks the clock
   try {
     const s = setup({ hangAfterPrompt: true }, { maxSeconds: 300 });
     const t0 = Date.now();
@@ -281,6 +282,7 @@ test("a provider hang settles as no_response instead of drifting to the wall clo
       .toContain("no model response");
   } finally {
     delete process.env.OMP_DISPATCH_DEAD_AIR_MS;
+    delete process.env.OMP_DISPATCH_POLL_MS;
   }
 }, 30_000);
 
@@ -304,9 +306,10 @@ test("the first-response watchdog stands down once the agent responds", async ()
 // on tool_start/agent_end. Reasoning frames must count as liveness.
 test("a long first turn that streams reasoning frames is not killed by the watchdog", async () => {
   process.env.OMP_DISPATCH_DEAD_AIR_MS = "200";
+  process.env.OMP_DISPATCH_POLL_MS = "50";     // polls DO run inside the window
   try {
     // No tool_start and no agent_end until 600ms in — well past the 200ms
-    // window — but a thinking_delta frame arrives immediately.
+    // window — but thinking deltas stream continuously throughout.
     const s = setup({ streamOnlyMs: 600 });
     const r = await runToSettled(s);
     expect(r.state).toBe("completed");
@@ -316,6 +319,48 @@ test("a long first turn that streams reasoning frames is not killed by the watch
     expect(log).not.toContain("no_response");
   } finally {
     delete process.env.OMP_DISPATCH_DEAD_AIR_MS;
+    delete process.env.OMP_DISPATCH_POLL_MS;
+  }
+}, 30_000);
+
+// A silent tool run is NOT dead air: omp frames tool_execution_start and
+// then goes quiet until tool_execution_end — a `cargo test` may do that for
+// minutes. The watchdog must stand down for the whole execution.
+test("tool execution silence is exempt from the dead-air watchdog", async () => {
+  process.env.OMP_DISPATCH_DEAD_AIR_MS = "200";
+  process.env.OMP_DISPATCH_POLL_MS = "50";
+  try {
+    const s = setup({ emitToolExecution: true, turnDelayMs: 800 });
+    const r = await runToSettled(s);
+    expect(r.state).toBe("completed");
+    expect(r.stopped_because).toBe("completed");
+    expect(readFileSync(join(s.runDir, "progress.log"), "utf8"))
+      .not.toContain("no_response");
+  } finally {
+    delete process.env.OMP_DISPATCH_DEAD_AIR_MS;
+    delete process.env.OMP_DISPATCH_POLL_MS;
+  }
+}, 30_000);
+
+// The mid-run wedge: turn one streams normally, a second message starts,
+// then the provider stalls forever (the sif retries froze mid-reasoning and
+// needed manual stops). The continuous watchdog settles it as no_response.
+test("a mid-run stream stall settles as no_response, not a manual stop", async () => {
+  process.env.OMP_DISPATCH_DEAD_AIR_MS = "200";
+  process.env.OMP_DISPATCH_POLL_MS = "50";
+  try {
+    const s = setup({ wedgeAfterFirstTurn: true }, { maxSeconds: 300 });
+    const t0 = Date.now();
+    const r = await runToSettled(s);
+    expect(r.state).toBe("error");
+    expect(r.stopped_because).toBe("no_response");
+    expect(Date.now() - t0).toBeLessThan(10_000);
+    const log = readFileSync(join(s.runDir, "progress.log"), "utf8");
+    expect(log).toContain("agent activity stopped");
+    expect(log).toContain("last event ame:thinking_delta");
+  } finally {
+    delete process.env.OMP_DISPATCH_DEAD_AIR_MS;
+    delete process.env.OMP_DISPATCH_POLL_MS;
   }
 }, 30_000);
 

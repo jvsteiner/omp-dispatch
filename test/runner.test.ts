@@ -262,6 +262,42 @@ test("an omp child that dies mid-turn ends the run as an error, not a hang, and 
   }
 }, 30_000);
 
+// A provider hang — prompt acked, RPC channel healthy (stats keep answering),
+// no agent_end ever — is the wedge shape seen in the wild as an intermittent
+// deepseek-flash failure. Without the first-response watchdog it drifts to
+// the max_seconds wall clock: minutes of silent dead air at zero turns and
+// $0. With it, the run fails fast, self-diagnoses, and names the remedy.
+test("a provider hang settles as no_response instead of drifting to the wall clock", async () => {
+  process.env.OMP_DISPATCH_DEAD_AIR_MS = "250";
+  try {
+    const s = setup({ hangAfterPrompt: true }, { maxSeconds: 300 });
+    const t0 = Date.now();
+    const r = await runToSettled(s);
+    expect(r.state).toBe("error");
+    expect(r.stopped_because).toBe("no_response");
+    expect(r.turns).toBe(0);
+    expect(Date.now() - t0).toBeLessThan(10_000);        // not the 300s cap
+    expect(readFileSync(join(s.runDir, "progress.log"), "utf8"))
+      .toContain("no model response");
+  } finally {
+    delete process.env.OMP_DISPATCH_DEAD_AIR_MS;
+  }
+}, 30_000);
+
+test("the first-response watchdog stands down once the agent responds", async () => {
+  process.env.OMP_DISPATCH_DEAD_AIR_MS = "200";
+  try {
+    // First frame lands well inside the window, so the timer must be
+    // cleared, not fired, and the run completes on its own terms.
+    const s = setup({ turnDelayMs: 50 });
+    const r = await runToSettled(s);
+    expect(r.state).toBe("completed");
+    expect(r.stopped_because).toBe("completed");
+  } finally {
+    delete process.env.OMP_DISPATCH_DEAD_AIR_MS;
+  }
+}, 30_000);
+
 // CARRY-OVER 6. unlockPaths and gitChangedSince can both genuinely throw (a
 // chmod failure, `git status` failing) — the tail of finish() must not let
 // either throw skip settled(result) or leave the run stuck at

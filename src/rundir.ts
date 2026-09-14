@@ -9,7 +9,7 @@ import { createHash } from "node:crypto";
 export type RunState = "running" | "asking" | "completed" | "capped" | "aborted" | "error";
 export type StoppedBecause =
   | "completed" | "max_turns" | "max_usd" | "max_seconds"
-  | "aborted" | "error" | "asking" | null;
+  | "aborted" | "error" | "no_response" | "asking" | null;
 
 export interface RunResult {
   run_id: string;

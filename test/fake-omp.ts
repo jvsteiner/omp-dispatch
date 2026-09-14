@@ -7,7 +7,7 @@
  *   { turnCostUsd, toolCallsPerTurn, replies: string[],
  *     nonTerminalFirst: boolean, askOnTurn: number | null,
  *     turnDelayMs: number, crashAfterPrompt: boolean, readyDelayMs: number,
- *     spawnGrandchild: boolean, statsFailAfter: number | null }
+ *     hangAfterPrompt: boolean, spawnGrandchild: boolean, statsFailAfter: number | null }
  *
  * FAKE_OMP_DUMP, when set, names a path this process writes its own argv,
  * cwd and CLAUDE_CONFIG_DIR to, so a test can assert what the host actually
@@ -28,6 +28,10 @@ const turnDelayMs: number = script.turnDelayMs ?? 0;
 // Simulates omp dying mid-turn (e.g. an OOM kill): the prompt is acked, then
 // the process exits before ever reporting agent_end.
 const crashAfterPrompt: boolean = script.crashAfterPrompt ?? false;
+// Simulates a provider hang: the prompt is acked and this process stays
+// alive — RPC keeps answering (get_session_stats included), exactly like a
+// real omp whose provider call wedged — but no agent_end ever comes.
+const hangAfterPrompt: boolean = script.hangAfterPrompt ?? false;
 // Delays the initial ready frame, so a test can act (e.g. send a signal)
 // while a host's client.start() is still genuinely pending.
 const readyDelayMs: number = script.readyDelayMs ?? 0;
@@ -155,6 +159,7 @@ for await (const line of console) {
     case "prompt": case "follow_up": case "steer":
       ok({ agentInvoked: true });
       if (crashAfterPrompt) { setTimeout(() => process.exit(1), 20); break; }
+      if (hangAfterPrompt) break;
       void runTurn();
       break;
     case "abort":

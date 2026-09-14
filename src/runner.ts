@@ -344,6 +344,9 @@ export async function startRun(
   let unsubscribeEvents: (() => void) | undefined;
   let wallClock: ReturnType<typeof setTimeout> | undefined;
   let costPoll: ReturnType<typeof setInterval> | undefined;
+  // The first-response watchdog's timer — see where it is armed, after the
+  // prompt is submitted, for why it exists and what it must not fire on.
+  let firstResponse: ReturnType<typeof setTimeout> | undefined;
 
   /**
    * Named so a resumed run can arm a second poll after the first was cleared
@@ -390,6 +393,7 @@ export async function startRun(
     // exact regression untestable.
     clearTimeout(wallClock);
     clearInterval(costPoll);
+    clearTimeout(firstResponse);
 
     let statsError: unknown;
     try {
@@ -453,7 +457,7 @@ export async function startRun(
       result.state = unlockFailed ? "error" : (
         stopped === "completed" ? "completed"
         : stopped === "aborted" ? "aborted"
-        : stopped === "error" ? "error"
+        : stopped === "error" || stopped === "no_response" ? "error"
         : stopped === "asking" ? "asking"
         : "capped");
 
@@ -546,6 +550,12 @@ export async function startRun(
     }
 
     const ev = event.assistantMessageEvent;
+      // Any frame from the agent — a tool call starting, or any agent_end,
+      // terminal or not — is proof the provider answered, and the
+      // first-response watchdog armed below has done its one job.
+      if (ev?.type === "tool_start" || event.type === "agent_end") {
+        clearTimeout(firstResponse);
+      }
       if (ev?.type === "tool_start") {
         appendProgress(runDir, `${ev.name} ${String(JSON.stringify(ev.input ?? "")).slice(0, 70)}`);
       }
@@ -636,6 +646,29 @@ export async function startRun(
       // supervisor's first poll used to land and see nothing but "running".
       // This line says the brief is in flight, not still connecting.
       appendProgress(runDir, `PROMPT submitted (${opts.prompt.length} chars)`);
+
+      // First-response watchdog, armed the moment the brief is in flight. A
+      // provider hang looks like this from here: the prompt was accepted,
+      // then nothing — zero turns, zero tool calls, $0 — while omp's own RPC
+      // channel stays healthy, so the stats poll keeps succeeding and nothing
+      // else notices; the run drifts to the max_seconds wall clock (twenty
+      // minutes of silent dead air on the default caps). Seen in the wild as
+      // an intermittent deepseek-flash failure. Deliberately bounds only the
+      // FIRST response: an agent that has answered once is bounded by the
+      // turn/budget/time caps, and a pending supervisor question is a wait on
+      // us, not the provider. Read per run, like OMP_DISPATCH_POLL_MS, so a
+      // test can shrink it without a module-load-time freeze.
+      const deadAirMs = Number(process.env.OMP_DISPATCH_DEAD_AIR_MS) || 240_000;
+      firstResponse = setTimeout(() => {
+        if (finishing) return;
+        appendProgress(
+          runDir,
+          `ERROR no model response within ${Math.round(deadAirMs / 1000)}s of the prompt — ` +
+          `provider hang suspected (zero turns, zero tool calls). ` +
+          `Stopping instead of burning the time cap; retry, or dispatch on a different tier.`,
+        );
+        void finish("no_response");
+      }, deadAirMs);
     }
   } catch (e) {
     if (!finishing) {

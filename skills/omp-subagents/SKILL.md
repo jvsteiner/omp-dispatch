@@ -52,8 +52,8 @@ timeout. Do useful independent work between polls; otherwise use a bounded
 wait. Continue collecting until the requested work has settled.
 
 The start acknowledgement names the resolved model and caps. Read it: a
-wrong model is free to fix at dispatch time (`omp_task_stop`, then dispatch
-again with `model:`) and expensive to discover after the run.
+wrong tier is free to fix at dispatch time (`omp_task_stop`, then dispatch
+again with another `model:` tier) and expensive to discover after the run.
 
 `omp_agent` and `omp_send_message` remain blocking when `run_in_background`
 is omitted, for existing Claude Code workflows.
@@ -80,10 +80,15 @@ cap. Stop the run if it is no longer needed.
 
 ## Models and definitions
 
-`model` accepts a configured tier (`haiku`, `sonnet`, `opus`, or a custom name)
-or an OMP model ID. These tier names are aliases, not requests for Claude.
-Omit it to use the definition's model or the configured default.
-Use `omp_models` to check what is available; don't guess provider IDs.
+`model` is a small palette of tier names the user configured — the same
+choices you make natively (`haiku`/`sonnet`/`opus`/`fable` for Claude-style
+work, `gpt-5.6-luna`/`gpt-5.6-terra`/`gpt-6-astra` for Codex-style, plus any
+custom tiers). Each maps to a model the user chose. Pick by job exactly as
+your habits say and never weigh cost, vendor or preference — every choice is
+pre-approved, and these names are aliases, not requests for a vendor model.
+Omit `model` to run on the definition's model or the user's default tier.
+Raw model ids are not accepted here; the user exposes them by adding them
+as tiers.
 
 Optional `subagent_type` names a Markdown definition found in this order:
 

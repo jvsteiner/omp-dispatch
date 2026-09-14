@@ -1,4 +1,5 @@
 import { test, expect, afterEach, beforeAll, afterAll } from "bun:test";
+import { z } from "zod";
 import { mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -127,17 +128,30 @@ test("a cap breach is reported in the footer, not thrown", async () => {
   expect(r.content[0].text).toContain("stopped_because=max_usd");
 }, 30_000);
 
-test("the model parameter's description advertises raw model ids", async () => {
+test("the model parameter is the palette enum, not an open string", async () => {
   const client = await connect();
   const { tools } = await client.listTools();
   const agentTool = tools.find(t => t.name === "omp_agent");
   expect(agentTool).toBeDefined();
-  const modelProp: any = (agentTool!.inputSchema as any).properties?.model;
-  expect(modelProp?.description).toContain("deepseek/deepseek-v4-pro");
-  expect(modelProp?.description).toContain("omp_models");
+  // Boundary data from the SDK: validate once, then read typed values.
+  const ModelProp = z.object({ enum: z.array(z.string()), description: z.string() });
+  const modelProp = z.object({ properties: z.object({ model: ModelProp }).optional() })
+    .parse(agentTool!.inputSchema).properties?.model;
+  // Exactly the native vocabularies of both hosts — a constrained choice is
+  // the point: the caller keeps its pick-by-job reflex and has no vendor
+  // catalogue or price list to deliberate over.
+  expect(modelProp?.enum).toContain("haiku");
+  expect(modelProp?.enum).toContain("sonnet");
+  expect(modelProp?.enum).toContain("opus");
+  expect(modelProp?.enum).toContain("fable");
+  expect(modelProp?.enum).toContain("gpt-5.6-luna");
+  expect(modelProp?.enum).toContain("gpt-5.6-terra");
+  expect(modelProp?.enum).toContain("gpt-6-astra");
+  expect(modelProp?.description).toContain("default tier");
+  expect(modelProp?.description).not.toContain("omp_models");
 });
 
-test("an explicit model is passed through verbatim, not treated as a tier", async () => {
+test("a palette tier resolves to the configured model in the child argv", async () => {
   const workdir = tmpWorkdir();
   const dumpDir = mkdtempSync(join(tmpdir(), "omp-agent-dump-"));
   const dump = join(dumpDir, "argv.json");
@@ -147,7 +161,7 @@ test("an explicit model is passed through verbatim, not treated as a tier", asyn
   const r: any = await client.callTool({
     name: "omp_agent",
     arguments: {
-      description: "pin a model", prompt: "go", workdir, model: "deepseek/deepseek-v4-pro",
+      description: "pick a tier", prompt: "go", workdir, model: "gpt-5.6-luna",
     },
   });
   expect(r.isError).toBeFalsy();
@@ -157,7 +171,24 @@ test("an explicit model is passed through verbatim, not treated as a tier", asyn
   expect(providerIdx).toBeGreaterThanOrEqual(0);
   expect(launched.argv[providerIdx + 1]).toBe("deepseek");
   expect(modelIdx).toBeGreaterThanOrEqual(0);
-  expect(launched.argv[modelIdx + 1]).toBe("deepseek-v4-pro");
+  // Codex's habitual id is a tier name here; the user's mapping decides the model.
+  expect(launched.argv[modelIdx + 1]).toBe("deepseek-flash");
+}, 30_000);
+
+test("a raw model id is refused by the schema before anything runs", async () => {
+  const client = await connect();
+  // The SDK converts schema violations into an isError result, not a throw.
+  const r: any = await client.callTool({
+    name: "omp_agent",
+    arguments: {
+      description: "raw id", prompt: "go", workdir: tmpWorkdir(),
+      model: "openai/gpt-5.5-pro",
+    },
+  });
+  expect(r.isError).toBe(true);
+  // The refusal teaches the palette, so the caller's retry needs no guessing.
+  expect(JSON.stringify(r.content)).toContain("Invalid enum value");
+  expect(JSON.stringify(r.content)).toContain("gpt-6-astra");
 }, 30_000);
 
 test("two concurrent dispatches get distinct names", async () => {
@@ -465,7 +496,7 @@ test("the definition's model is used when no explicit model is given", async () 
 
 test("an explicit model argument beats the definition's", async () => {
   const workdir = projectWithAgents({
-    picky: agentDef("picky", "tools: Read\nmodel: zai/glm-4.7\n"),
+    picky: agentDef("picky", "tools: Read\nmodel: haiku\n"),
   });
   process.env.FAKE_OMP_SCRIPT = JSON.stringify({});
   const client = await connect();
@@ -474,11 +505,11 @@ test("an explicit model argument beats the definition's", async () => {
   try {
     await dispatch(client, {
       description: "override run", prompt: "go", subagent_type: "picky",
-      model: "deepseek/deepseek-v4-pro", workdir,
+      model: "opus", workdir,
     });
     const argv = JSON.stringify(JSON.parse(readFileSync(dump, "utf8")).argv);
-    expect(argv).toContain("deepseek-v4-pro");
-    expect(argv).not.toContain("glm-4.7");
+    expect(argv).toContain("glm-5.3");
+    expect(argv).not.toContain("deepseek-flash");
   } finally {
     delete process.env.FAKE_OMP_DUMP;
   }

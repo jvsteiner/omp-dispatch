@@ -93,31 +93,61 @@ project `.claude/agents/`, user `~/.omp-dispatch/agents/`, then user
 `~/.claude/agents/`, in that order. Copy a shipped template into one of those
 directories before passing its name as `subagent_type`.
 
-## Choosing models
+## Choosing models — the palette
 
-Dispatches resolve `model` in this order: an explicit argument, then the agent
-definition's `model:`, then your default tier.
-
-The shipped tiers:
+The calling agent should never deliberate over models, cost or your
+preferences. `omp_agent`'s `model` parameter is therefore an enum of tier
+names — the palette — drawn from both hosts' native vocabularies, each
+mapped to a model **you** chose:
 
 ```json
 {
   "tiers": {
-    "haiku":  "deepseek/deepseek-flash",
-    "sonnet": "deepseek/deepseek-flash",
-    "opus":   "zai/glm-5.3"
+    "haiku":          "deepseek/deepseek-flash",
+    "sonnet":         "deepseek/deepseek-flash",
+    "opus":           "zai/glm-5.3",
+    "fable":          "zai/glm-5.3",
+    "gpt-5.6-luna":   "deepseek/deepseek-flash",
+    "gpt-5.6-terra":  "deepseek/deepseek-flash",
+    "gpt-6-astra":    "zai/glm-5.3"
   },
   "default": "sonnet"
 }
 ```
 
-Override them in `~/.omp-dispatch/config.json`, or per project in
-`<project>/.omp-dispatch/config.json`. Project settings win key by key, so you
-can change one tier without restating the rest. Invent your own tier names if
-you like.
+Claude Code's subagent habits (`model: "haiku" | "sonnet" | "opus" |
+"fable"`) and Codex's spawn_agent habits (`gpt-5.6-luna`, `gpt-5.6-terra`,
+`gpt-6-astra`, or omitted) all land on your models with zero decisions:
+omitting `model` uses your `default` tier. Resolution order per dispatch: an
+explicit `model` argument, then the agent definition's `model:`, then your
+default tier.
 
-You can also skip tiers entirely and pass a model id straight to `omp_agent`.
-Run `omp_models` to see what is available and authenticated.
+Override the map in `~/.omp-dispatch/config.json`, or per project in
+`<project>/.omp-dispatch/config.json`. Project settings win key by key, so
+you can change one tier without restating the rest. Invent your own tier
+names if you like — but names that exist only in a project config cannot
+appear in the MCP enum (it is built at server start, before any workdir is
+known); add shared names to the user-level config. To expose a raw model id
+in the palette, map it to itself:
+`"deepseek/deepseek-v4-pro": "deepseek/deepseek-v4-pro"`.
+
+### Locking it down with `allow`
+
+The enum constrains callers, but agent definitions pinning `model:` and the
+CLI (`dispatch start --model <id>`) bypass it. An optional `allow` list
+closes those paths — when set, no dispatch may resolve to anything else:
+
+```json
+{
+  "allow": ["deepseek/deepseek-flash", "zai/glm-5.3"]
+}
+```
+
+A violation fails before the run starts, naming the model, where it came
+from (argument, definition, or default tier) and the allowed set. A project
+`allow` replaces (never widens) the user-level one. Raw ids remain available
+to the CLI and task files when unrestricted; `omp_models` still lists the
+catalogue for you.
 
 ## Turning it on by default
 

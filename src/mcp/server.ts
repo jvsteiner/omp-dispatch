@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { loadProviderKeys } from "../env.ts";
+import { loadTierConfig } from "../models.ts";
 import { startRun } from "../runner.ts";
 import {
   AGENT_DEFAULTS, capsFor, DEFAULT_REPORTING_PROMPT, pluginVersion, resolveAgentDef,
@@ -40,9 +41,31 @@ async function runOmp(args: string[], extraEnv: Record<string, string> = {}): Pr
 }
 
 
-const MODEL_DESCRIPTION =
-  "A tier name from your config (haiku, sonnet, opus, or one of your own), or any omp " +
-  "model id such as `deepseek/deepseek-v4-pro`. Run `omp_models` to see what is available.";
+/**
+ * omp_agent's `model` parameter is an enum of exactly the user's configured
+ * tier names — the palette both hosts' callers already know how to pick from
+ * (Claude Code's haiku/sonnet/opus/fable, Codex's gpt-5.6-luna/terra and
+ * gpt-6-astra, plus custom tiers). A constrained choice is the whole point:
+ * the caller keeps its native pick-by-job reflex and has no vendor model,
+ * price list or catalogue to deliberate over. Raw model ids are the CLI's
+ * power path; a user who wants one exposed here adds it as a tier
+ * (`"deepseek/deepseek-v4-pro": "deepseek/deepseek-v4-pro"`).
+ *
+ * Read once at server start from the user-level config only — a per-project
+ * config may remap palette entries and the default, but names invented only
+ * in a project config cannot appear in a schema built before any workdir is
+ * known. Add shared tier names to ~/.omp-dispatch/config.json.
+ */
+function modelPaletteSchema(home: string) {
+  const cfg = loadTierConfig([join(home, ".omp-dispatch", "config.json")]);
+  const names = Object.keys(cfg.tiers).sort();
+  return z.enum(names as [string, ...string[]]).optional().describe(
+    "Pick by job exactly as you would natively — each name is a tier the user mapped " +
+    "to a model they chose, so cost and preference are already handled; never " +
+    `deliberate over it. Omit to run on the user's default tier ('${cfg.default}'). ` +
+    `Palette: ${names.join(", ")}.`,
+  );
+}
 
 export interface CreateServerOptions {
   /**
@@ -116,7 +139,7 @@ export function createServer(opts: CreateServerOptions = {}): McpServer {
 
   server.tool(
     "omp_agent",
-    "Spawn an omp subagent (DeepSeek or GLM by default) to run a task end to end, in " +
+    "Spawn an omp subagent on the user's configured models to run a task end to end, in " +
       "place of a native subagent. Set run_in_background for asynchronous dispatch. Otherwise blocks until " +
       "the run settles and returns its final report followed by a compact footer. A cap " +
       "breach (max turns or max spend) is reported in that footer, not thrown.",
@@ -130,7 +153,7 @@ export function createServer(opts: CreateServerOptions = {}): McpServer {
           "ToolSearch, an mcp__* tool) is refused rather than run weakened. Omit to run " +
           "with the defaults.",
       ),
-      model: z.string().optional().describe(MODEL_DESCRIPTION),
+      model: modelPaletteSchema(process.env.HOME ?? ""),
       name: z.string().optional().describe(
         "A name for this run, for use later with omp_send_message. Auto-generated from " +
           "description when omitted. An explicit name already in use is an error naming " +
@@ -305,7 +328,7 @@ export function createServer(opts: CreateServerOptions = {}): McpServer {
             `Collect with omp_task_output({name: ${JSON.stringify(runName)}, wait_seconds: 25}). ` +
             `Run directory: ${runDir}\n` +
             `Wrong model? omp_task_stop({name: ${JSON.stringify(runName)}}) and dispatch again ` +
-            `with model=<id> — omp_models lists what is available.`,
+            `with another tier from the model palette.`,
           }] };
         }
         return await done;

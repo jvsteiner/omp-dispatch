@@ -189,6 +189,20 @@ Resolution order, highest precedence first:
 
 Whatever is resolved goes through the provider guard (§6.2) before a run starts.
 
+> **Addendum (2026-09-14) — the palette supersedes the verbatim-argument rule
+> above.** In practice an open `model` string made calling agents deliberate
+> over vendor models, price and user preference instead of doing the task.
+> `omp_agent`'s `model` parameter is now an **enum of tier names**, built at
+> server start from `~/.omp-dispatch/config.json`: the shipped palette covers
+> both hosts' native vocabularies (Claude's `haiku`/`sonnet`/`opus`/`fable`
+> and Codex's `gpt-5.6-luna`/`gpt-5.6-terra`/`gpt-6-astra`), so callers keep
+> their habitual pick-by-job reflex and omission still lands on the user's
+> `default` tier. Raw model ids move to the CLI/task-file power path, and a
+> user can surface one in the palette by mapping it to itself. An optional
+> `allow` list (resolved model ids, project config replaces rather than
+> widens) enforces the same ceiling on definition-pinned models and the CLI,
+> failing before a run starts with the model, its origin and the allowed set.
+
 ### The tier map — defaults, not rules
 
 ```json

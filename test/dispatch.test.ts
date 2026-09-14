@@ -79,13 +79,17 @@ function gitRepo(): Promise<string> {
   })();
 }
 
-test("an explicit model id is echoed in the ack, not resolved away", async () => {
+test("a tier resolves through the map and the resolved id is echoed in the ack", async () => {
   const c = await connect();
   const r: any = await call(c, "omp_agent", {
-    description: "explicit model", prompt: "go", name: "explicit",
-    model: "zai/glm-5.3", run_in_background: true,
+    description: "tier model", prompt: "go", name: "explicit",
+    model: "opus", run_in_background: true,
     workdir: mkdtempSync(join(tmpdir(), "omp-dispatch-w-")),
   });
+  const text = r.content[0].text as string;
+  // 'opus' is the caller's word; the ack reports the user's model behind it,
+  // so a wrong mapping is catchable at t=0.
+  expect(text).toMatch(/model=zai\/glm-5\.3 /);
   await call(c, "omp_task_output", { name: "explicit", wait_seconds: 5 });
 });
 

@@ -158,7 +158,8 @@ export async function runDiagnostics(workdir: string): Promise<DoctorReport> {
       join(workdir, ".omp-dispatch", "config.json"),
     ]);
     const def = cfg.tiers[cfg.default] ?? cfg.default;
-    ok("tiers", `default ${cfg.default} -> ${def}; known: ${Object.keys(cfg.tiers).sort().join(", ")}`);
+    ok("tiers", `default ${cfg.default} -> ${def}; palette: ${Object.keys(cfg.tiers).sort().join(", ")}` +
+      (cfg.allow ? `; allow: ${cfg.allow.join(", ")}` : "; allow: unrestricted"));
   } catch (e) {
     fail("tiers", String(e instanceof Error ? e.message : e));
   }

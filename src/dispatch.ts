@@ -105,6 +105,11 @@ export function resolveAgentDef(subagentType: string, workdir: string, home: str
  * Precedence, highest first: an explicit argument, the definition's model:,
  * then the configured default tier. `workdir` should be the directory the run
  * will actually execute in, so a project config there applies.
+ *
+ * When the effective config sets `allow`, the resolved model must be on it.
+ * The refusal names where the model came from — argument, definition, or
+ * default tier — because the fix differs: change the argument, the
+ * definition, or the config.
  */
 export function resolveDispatchModel(
   requested: string | undefined,
@@ -116,7 +121,25 @@ export function resolveDispatchModel(
     join(home, ".omp-dispatch", "config.json"),
     join(workdir, ".omp-dispatch", "config.json"),
   ]);
-  return resolveModel(requested ?? def?.model, cfg);
+  const raw = requested ?? def?.model;
+  const trimmed = raw?.trim();
+  const origin = requested !== undefined
+    ? `the model argument '${trimmed}'`
+    : def?.model !== undefined
+      ? `agent definition '${def.name}' (${def.source}) setting model: '${trimmed}'`
+      : `the configured default tier '${cfg.default}'`;
+  const resolved = resolveModel(raw, cfg);
+  if (cfg.allow && !cfg.allow.includes(resolved)) {
+    throw new Error(
+      `${origin} resolved to '${resolved}', which is not on this config's allow list.\n` +
+      `Allowed models: ${cfg.allow.join(", ")}\n` +
+      `Allowed tier names (each maps to a model you configured): ` +
+      `${Object.keys(cfg.tiers).sort().join(", ")} — pass one of those instead.\n` +
+      `Adjust 'allow', 'tiers' or 'default' in ~/.omp-dispatch/config.json or ` +
+      `${join(workdir, ".omp-dispatch", "config.json")}.`,
+    );
+  }
+  return resolved;
 }
 
 /** Cap for a run: the definition's maxTurns wins over the default. */

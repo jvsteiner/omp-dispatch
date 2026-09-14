@@ -173,11 +173,15 @@ project `.omp-dispatch`, project `.claude`, home `.omp-dispatch`, home `.claude`
 (each under `agents/`). The shipped `agents/` templates are optional examples,
 not automatically registered Codex agents.
 
-The existing `haiku`, `sonnet` and `opus` names are configurable OMP model tiers.
-They do not choose Claude or Codex models. Both hosts use the same
-`~/.omp-dispatch/config.json` and per-project overrides. Use `omp_models` to
-inspect the OMP catalogue. Actual savings depend on the selected provider and
-task; no Codex cost comparison has been measured here.
+`model` is a palette of tier names, not vendor models — and it already speaks
+Codex: the `gpt-5.6-luna` (fast/mechanical), `gpt-5.6-terra` (everyday) and
+`gpt-6-astra` (hard/high-stakes) ids you would pass natively to spawn_agent
+are tier names here, alongside Claude-style `haiku`/`sonnet`/`opus`/`fable`.
+Pick by job as usual; each name maps to a model the user configured, and
+omitting `model` uses their default tier. Configure in
+`~/.omp-dispatch/config.json` with per-project overrides (`tiers`, `default`,
+and an optional `allow` allow-list). `omp_models` inspects the OMP catalogue;
+actual savings depend on the selected provider and task.
 
 ## When the server will not start
 

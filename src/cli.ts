@@ -9,7 +9,8 @@ import {
 import { createWorktree, type Worktree } from "./worktree.ts";
 import { runDiagnostics } from "./doctor.ts";
 import {
-  AGENT_DEFAULTS, capsFor, resolveAgentDef, resolveDispatchModel, resultFooter,
+  AGENT_DEFAULTS, capsFor, DEFAULT_REPORTING_PROMPT, resolveAgentDef,
+  resolveDispatchModel, resultFooter, runningStatus,
 } from "./dispatch.ts";
 import { uniqueName } from "./mcp/runs.ts";
 
@@ -202,7 +203,7 @@ async function cmdStart(argv: string[], opts: CliOptions): Promise<number> {
       model,
       workdir: targetWorkdir,
       tools: def ? def.ompTools.join(",") : AGENT_DEFAULTS.tools,
-      systemPrompt: def?.systemPrompt,
+      systemPrompt: def?.systemPrompt ?? DEFAULT_REPORTING_PROMPT,
       maxTurns: caps.maxTurns,
       maxUsd: caps.maxUsd,
       maxSeconds: caps.maxSeconds,
@@ -237,7 +238,16 @@ async function cmdStart(argv: string[], opts: CliOptions): Promise<number> {
     }
     out((result.last_reply ?? "(no reply)") +
       resultFooter(name, result, { modelLabel: model, runDir }) + isolationNote + "\n");
-    return result.state === "error" ? 1 : 0;
+    if (result.state === "error") {
+      // Self-diagnosing failure, same rationale as omp_agent's error path:
+      // the doctor rides along with the failure, one command and one
+      // approval instead of two. Never masks the failure it explains.
+      try {
+        err(`\n${(await runDiagnostics(baseWorkdir)).text}\n`);
+      } catch { /* the failure itself is the message */ }
+      return 1;
+    }
+    return 0;
   } finally {
     rmSync(join(runDir, "monitor.pid"), { force: true });
     await handle.dispose();
@@ -287,8 +297,7 @@ async function cmdOutput(argv: string[], opts: CliOptions): Promise<number> {
 
   const log = join(run.dir, "progress.log");
   const lines = existsSync(log) ? readFileSync(log, "utf8").split("\n").filter(Boolean) : [];
-  out(`run '${result.name ?? run.runId}': state=${result.state}` +
-    (result.ask ? ` question=${JSON.stringify(result.ask)}` : "") + "\n" +
+  out(runningStatus(result.name ?? run.runId, result, run.dir) + "\n" +
     (lines.length
       ? lines.slice(-(Number(flags["lines"] ?? 40))).join("\n")
       : "No progress log yet.") + "\n");

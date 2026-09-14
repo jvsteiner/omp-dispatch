@@ -6,7 +6,8 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { loadProviderKeys } from "../env.ts";
 import { startRun } from "../runner.ts";
 import {
-  AGENT_DEFAULTS, capsFor, pluginVersion, resolveAgentDef, resolveDispatchModel, resultFooter,
+  AGENT_DEFAULTS, capsFor, DEFAULT_REPORTING_PROMPT, pluginVersion, resolveAgentDef,
+  resolveDispatchModel, resultFooter, runningStatus,
 } from "../dispatch.ts";
 import { runDiagnostics } from "../doctor.ts";
 import { readDiff } from "../rundir.ts";
@@ -202,7 +203,9 @@ export function createServer(opts: CreateServerOptions = {}): McpServer {
             model: resolvedModel,
             workdir: targetWorkdir,
             tools: def ? def.ompTools.join(",") : AGENT_DEFAULTS.tools,
-            systemPrompt: def?.systemPrompt,
+            // Definition-less dispatches still run under the fire-and-forget
+            // reporting contract — terse by default, not per-brief.
+            systemPrompt: def?.systemPrompt ?? DEFAULT_REPORTING_PROMPT,
             maxTurns: caps.maxTurns,
             maxUsd: caps.maxUsd,
             maxSeconds: caps.maxSeconds,
@@ -270,12 +273,19 @@ export function createServer(opts: CreateServerOptions = {}): McpServer {
             // handle so list/output can still explain what failed.
             if (!run_in_background) registry.remove(runName);
             await handle.dispose();
-            throw new Error(
+            // Self-diagnosing failure: the doctor output rides along with
+            // the error, so the caller learns WHAT to fix in the same
+            // exchange instead of a second tool call (and, on a sandboxed
+            // host, a second approval). Diagnostics must never mask the
+            // failure it is explaining.
+            let message =
               `omp_agent: run '${runName}' (${runId}) did not complete: ` +
-              `${result.stopped_because ?? "error"}. See ${runDir}/progress.log for details.${isolationNote}`,
-            );
+              `${result.stopped_because ?? "error"}. See ${runDir}/progress.log for details.${isolationNote}`;
+            try {
+              message += `\n\n${(await runDiagnostics(baseWorkdir)).text}`;
+            } catch { /* the failure itself is the message */ }
+            throw new Error(message);
           }
-
           // The footer prefers RunResult.model — the agent's own reported
           // state, and the one field that can drift from what was asked for —
           // falling back to the resolved request string only when the run
@@ -472,8 +482,7 @@ export function createServer(opts: CreateServerOptions = {}): McpServer {
         } finally { clearTimeout(timer); }
         if (operation.reply) return withDiff(operation.reply);
       }
-      const status = `run '${name}': state=${handle.result.state}` +
-        (handle.result.ask ? ` question=${JSON.stringify(handle.result.ask)}` : "");
+      const status = runningStatus(name, handle.result, handle.runDir);
       const log = join(handle.runDir, "progress.log");
       let text: string;
       try {

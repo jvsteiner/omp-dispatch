@@ -108,10 +108,15 @@ the run's `result.json` and the report footer.
 
 Write briefs that make verification cheap: require the agent to return
 evidence (path:line citations, links, command output) so reviewing its report
-replaces re-running its work. Do one focused review of the collected result
-rather than duplicating the agent's investigation in the supervising session —
-every host-side check you run is an approval prompt the delegation was
-supposed to remove.
+replaces re-running its work. Dispatches are fire-and-forget: the agent's
+single reply is the deliverable, so the brief must carry everything — context,
+constraints, definition of done — because no follow-up conversation is
+planned. Definition-less dispatches run under a terse one-reply contract
+(changed files, verifying command output, failures with raw output); a report
+longer than its diff is a finding, not thoroughness. Do one focused review of
+the collected result rather than duplicating the agent's investigation in the
+supervising session — every host-side check you run is an approval prompt the
+delegation was supposed to remove.
 
 A dirty worktree is kept and its path reported. A clean worktree is removed
 after the initial run, so start a new isolated run instead of resuming one

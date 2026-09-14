@@ -41,6 +41,11 @@ Run controls:
 - A background start acknowledges the resolved **model and caps** — a wrong
   tier is catchable at dispatch time — and `omp_task_output` accepts
   **`include_diff`** to return a run's git diff with its report.
+- Definition-less dispatches run under a **fire-and-forget reporting
+  contract**: one terse reply — changed files, verifying command output,
+  failures with raw output. No narration, no causal theories.
+- A dispatch that fails **explains itself**: the doctor's findings ride
+  along with the error, one call instead of two.
 
 ## Install
 

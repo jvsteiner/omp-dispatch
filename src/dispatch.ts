@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { AgentDef } from "./agentdef.ts";
 import { discoverAgentDefs } from "./agentdef.ts";
@@ -34,6 +34,39 @@ export const AGENT_DEFAULTS = {
   maxSeconds: 1200,
 };
 
+
+/**
+ * The contract every definition-less dispatch runs under: fire-and-forget.
+ * The dispatch's whole value is that the caller stops paying attention, so
+ * the agent's single reply is the entire deliverable — not the opening of a
+ * conversation, and not a place to narrate process. Two observed failure
+ * modes motivated it: reports longer than the change they describe, and
+ * confident causal theories ("failed because of tool shadowing") with
+ * nothing observed behind them.
+ */
+export const DEFAULT_REPORTING_PROMPT = [
+  "You are dispatched fire-and-forget. This one reply is the entire deliverable:",
+  "nobody will answer it, nobody will ask you a follow-up, and the caller reads",
+  "the diff. Terse, in this order:",
+  "1. what changed (files)",
+  "2. what verifies it — the commands you ran and their actual output",
+  "3. anything that failed, with its raw output, and no cause you did not establish",
+  "",
+  "Do not restate the brief, narrate your process, or explain false starts.",
+  "A report longer than the diff is wrong. If the diff says it, don't.",
+].join("\n");
+
+/**
+ * One live-status line for a run that has not settled, shared by
+ * omp_task_output and the CLI so a poll answers "is it working, how far,
+ * how much" instead of just "running".
+ */
+export function runningStatus(name: string, result: RunResult, runDir: string): string {
+  const elapsed = Math.max(0, Math.round((Date.now() - statSync(runDir).birthtimeMs) / 1000));
+  return `run '${name}': state=${result.state} turns=${result.turns} ` +
+    `cost_usd=${result.cost_usd.toFixed(4)} elapsed=${elapsed}s` +
+    (result.ask ? ` question=${JSON.stringify(result.ask)}` : "");
+}
 /**
  * Resolve `subagent_type` to a definition, or refuse — with the same error
  * text the MCP tool has always produced, so a caller reading a refusal from

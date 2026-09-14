@@ -350,6 +350,7 @@ export async function startRun(
    * in teardown. Reads its interval per call, like the wall clock, so a test
    * can shrink it without a module-load-time freeze.
    */
+  let lastHeartbeatCost = 0;
   const armCostPoll = () => {
     const pollIntervalMs = Number(process.env.OMP_DISPATCH_POLL_MS) || 15_000;
     costPoll = setInterval(() => {
@@ -357,6 +358,14 @@ export async function startRun(
       void (async () => {
         const ok = await refreshStats();
         if (finishing || !ok) return;
+        // A long single turn emits no tool_start and no agent_end, so the
+        // log goes quiet for its whole duration. A cost heartbeat when the
+        // number has MOVED (never a fixed-cadence line — a stuck agent must
+        // still look stuck) is the difference between "working" and "hung".
+        if (state.costUsd > lastHeartbeatCost + 1e-9) {
+          appendProgress(runDir, `heartbeat turns=${state.turns} $${state.costUsd.toFixed(4)}`);
+          lastHeartbeatCost = state.costUsd;
+        }
         const b = breach(state, caps);
         if (b) {
           appendProgress(runDir, `POLL breach detected mid-turn: ${b} ($${state.costUsd.toFixed(4)})`);
@@ -623,6 +632,10 @@ export async function startRun(
       writeResult(runDir, result);
       appendProgress(runDir, `START ${opts.model}`);
       await client.prompt(opts.prompt);
+      // The gap between START and the first tool_start is exactly where a
+      // supervisor's first poll used to land and see nothing but "running".
+      // This line says the brief is in flight, not still connecting.
+      appendProgress(runDir, `PROMPT submitted (${opts.prompt.length} chars)`);
     }
   } catch (e) {
     if (!finishing) {

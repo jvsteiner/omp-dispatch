@@ -27,12 +27,12 @@ afterEach(async () => {
   delete process.env.FAKE_OMP_SCRIPT;
 });
 
-async function connect() {
+async function connect(command?: string[]) {
   process.env.FAKE_OMP_SCRIPT = JSON.stringify({});
   const [a, b] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "dispatch-test", version: "0" }, { capabilities: {} });
   await Promise.all([
-    createServer({ command: ["bun", join(import.meta.dir, "fake-omp.ts")] }).connect(a),
+    createServer({ command: command ?? ["bun", join(import.meta.dir, "fake-omp.ts")] }).connect(a),
     client.connect(b),
   ]);
   clients.push(client);
@@ -147,6 +147,80 @@ test("omp_doctor fails loudly when an omp database cannot be written", async () 
   } finally {
     process.env.HOME = originalHome;
   }
+});
+
+test("a poll of a running dispatch shows turns, cost and elapsed, not just state", async () => {
+  const c = await connect();
+  process.env.FAKE_OMP_SCRIPT = JSON.stringify({ turnDelayMs: 900, replies: ["the report"] });
+  const repo = await gitRepo();
+  await call(c, "omp_agent", {
+    description: "live status", prompt: "go", name: "live",
+    workdir: repo, run_in_background: true,
+  });
+  const r: any = await call(c, "omp_task_output", { name: "live", wait_seconds: 0.01 });
+  const text = r.content[0].text as string;
+  expect(text).toMatch(/state=running turns=\d+ cost_usd=[\d.]+ elapsed=\d+s/);
+  // the log answers "is it working", not just "is it alive"
+  expect(text).toContain("START deepseek/deepseek-flash");
+  expect(text).toContain("PROMPT submitted");
+  await call(c, "omp_task_output", { name: "live", wait_seconds: 10 });
+});
+
+test("a definition-less dispatch runs under the fire-and-forget reporting contract", async () => {
+  const c = await connect();
+  const dump = join(mkdtempSync(join(tmpdir(), "omp-dispatch-dump-")), "args.json");
+  process.env.FAKE_OMP_DUMP = dump;
+  try {
+    await call(c, "omp_agent", {
+      description: "contract", prompt: "go", name: "contract",
+      workdir: mkdtempSync(join(tmpdir(), "omp-dispatch-w-")),
+    });
+    const argv = JSON.parse(readFileSync(dump, "utf8")).argv as string[];
+    const promptArg = argv.find((a: string) => a.includes("fire-and-forget"));
+    expect(promptArg).toBeDefined();
+    expect(promptArg).toContain("A report longer than the diff is wrong");
+  } finally {
+    delete process.env.FAKE_OMP_DUMP;
+  }
+});
+
+test("a definition's own system prompt replaces the default contract", async () => {
+  const c = await connect();
+  const dump = join(mkdtempSync(join(tmpdir(), "omp-dispatch-dump-")), "args.json");
+  process.env.FAKE_OMP_DUMP = dump;
+  const home = mkdtempSync(join(tmpdir(), "omp-dispatch-defhome-"));
+  mkdirSync(join(home, ".omp-dispatch", "agents"), { recursive: true });
+  writeFileSync(join(home, ".omp-dispatch", "agents", "terse-tester.md"),
+    "---\nname: terse-tester\ndescription: test\nmodel: sonnet\n---\nYou are a custom voice.\n");
+  const originalHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    await call(c, "omp_agent", {
+      description: "custom def", prompt: "go", name: "customdef", subagent_type: "terse-tester",
+      workdir: mkdtempSync(join(tmpdir(), "omp-dispatch-w-")),
+    });
+    const argv = JSON.parse(readFileSync(dump, "utf8")).argv as string[];
+    const promptArg = argv.find((a: string) => a.includes("custom voice")) as string | undefined;
+    expect(promptArg).toBeDefined();
+    expect(promptArg).not.toContain("fire-and-forget");
+  } finally {
+    process.env.HOME = originalHome;
+    delete process.env.FAKE_OMP_DUMP;
+  }
+});
+
+test("a failed dispatch explains itself with the doctor instead of a second call", async () => {
+  const c = await connect(["bun", "/definitely/not/a/real/omp.ts"]);
+  const start: any = await call(c, "omp_agent", {
+    description: "doomed", prompt: "go", name: "doomed", run_in_background: true,
+    workdir: mkdtempSync(join(tmpdir(), "omp-dispatch-w-")),
+  });
+  expect(start.isError).toBeFalsy();
+  const r: any = await call(c, "omp_task_output", { name: "doomed", wait_seconds: 5 });
+  expect(r.isError).toBe(true);
+  const text = r.content[0].text as string;
+  expect(text).toContain("did not complete");
+  expect(text).toMatch(/doctor: [67]\/7 checks passed|FAIL/);
 });
 
 test("a settled run collects with its git diff, and the footer points at diff.patch", async () => {

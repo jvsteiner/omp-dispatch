@@ -67,6 +67,23 @@ test("start dispatches, reports, persists the name, and removes its monitor mark
   expect(existsSync(join(run.dir, "monitor.pid"))).toBe(false);
 });
 
+test("a failed dispatch explains itself with the doctor instead of a second command", async () => {
+  const chunks: string[] = [];
+  const errs: string[] = [];
+  const code = await runCli([
+    "start", "--prompt", "go", "--workdir", mkdtempSync(join(tmpdir(), "omp-cli-work-")),
+  ], {
+    command: ["bun", "/definitely/not/a/real/omp.ts"],
+    out: s => chunks.push(s),
+    err: s => errs.push(s),
+  });
+  expect(code).toBe(1);
+  const err = errs.join("");
+  // the run's own footer says what stopped it; the doctor says why
+  expect(chunks.join("")).toContain("stopped_because=error");
+  expect(err).toMatch(/doctor: \d\/7 checks passed|FAIL/);
+});
+
 test("start refuses a missing prompt instead of dispatching anything", async () => {
   const r = await cli(["start", "--workdir", mkdtempSync(join(tmpdir(), "omp-cli-work-"))]);
   expect(r.code).toBe(1);

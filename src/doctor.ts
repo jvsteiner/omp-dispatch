@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { Database } from "bun:sqlite";
 import { loadProviderKeys } from "./env.ts";
-import { loadTierConfig } from "./models.ts";
+import { ensureUserConfig, loadTierConfig } from "./models.ts";
 import { runsRoot } from "./rundir.ts";
 import { discoverAgentDefs } from "./agentdef.ts";
 import { pluginVersion } from "./dispatch.ts";
@@ -153,13 +153,19 @@ export async function runDiagnostics(workdir: string): Promise<DoctorReport> {
   }
 
   try {
-    const cfg = loadTierConfig([
-      join(home, ".omp-dispatch", "config.json"),
-      join(workdir, ".omp-dispatch", "config.json"),
-    ]);
-    const def = cfg.tiers[cfg.default] ?? cfg.default;
-    ok("tiers", `default ${cfg.default} -> ${def}; palette: ${Object.keys(cfg.tiers).sort().join(", ")}` +
-      (cfg.allow ? `; allow: ${cfg.allow.join(", ")}` : "; allow: unrestricted"));
+    const ensured = ensureUserConfig(home);
+    if (ensured?.error) {
+      fail("tiers", `could not create ${ensured.path}: ${ensured.error}`);
+    } else {
+      const cfg = loadTierConfig([
+        join(home, ".omp-dispatch", "config.json"),
+        join(workdir, ".omp-dispatch", "config.json"),
+      ]);
+      const def = cfg.tiers[cfg.default] ?? cfg.default;
+      ok("tiers", `default ${cfg.default} -> ${def}; palette: ${Object.keys(cfg.tiers).sort().join(", ")}` +
+        (cfg.allow ? `; allow: ${cfg.allow.join(", ")}` : "; allow: unrestricted") +
+        (ensured?.created ? ` — created ${ensured.path} with the shipped palette, edit it to remap` : ""));
+    }
   } catch (e) {
     fail("tiers", String(e instanceof Error ? e.message : e));
   }

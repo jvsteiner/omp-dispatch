@@ -149,6 +149,9 @@ test("the model parameter is the palette enum, not an open string", async () => 
   expect(modelProp?.enum).toContain("gpt-6-astra");
   expect(modelProp?.description).toContain("default tier");
   expect(modelProp?.description).not.toContain("omp_models");
+  // The server's first start is a fresh install's first moment: the editable
+  // config comes into being here, with the shipped palette.
+  expect(existsSync(join(process.env.HOME!, ".omp-dispatch", "config.json"))).toBe(true);
 });
 
 test("a palette tier resolves to the configured model in the child argv", async () => {

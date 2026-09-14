@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { resolveModel, loadTierConfig, DEFAULT_TIERS } from "../src/models.ts";
+import { resolveModel, loadTierConfig, ensureUserConfig, DEFAULT_TIERS } from "../src/models.ts";
 
 test("the shipped palette covers both hosts' native model vocabularies", () => {
   // Claude Code's Agent model field...
@@ -72,4 +72,24 @@ test("a malformed allow list is refused naming the file", () => {
 test("an empty or whitespace-only request falls through to the default tier, not a literal empty model id", () => {
   expect(resolveModel("", DEFAULT_TIERS)).toBe("deepseek/deepseek-flash");
   expect(resolveModel("   ", DEFAULT_TIERS)).toBe("deepseek/deepseek-flash");
+});
+
+test("ensureUserConfig creates the shipped palette only when the file is absent", () => {
+  const { mkdtempSync, writeFileSync, readFileSync } = require("node:fs");
+  const { join } = require("node:path");
+  const home = mkdtempSync(require("node:os").tmpdir() + "/omp-ensure-");
+  const path = join(home, ".omp-dispatch", "config.json");
+  expect(ensureUserConfig(home)?.created).toBe(true);
+  const written = JSON.parse(readFileSync(path, "utf8"));
+  expect(written.tiers).toEqual(DEFAULT_TIERS.tiers);
+  expect(written.default).toBe(DEFAULT_TIERS.default);
+  expect(readFileSync(path, "utf8").endsWith("\n")).toBe(true);
+  // Once it exists it is the user's — never overwritten, even with shipped values.
+  writeFileSync(path, "{}\n");
+  expect(ensureUserConfig(home)?.created).toBe(false);
+  expect(readFileSync(path, "utf8")).toBe("{}\n");
+});
+
+test("ensureUserConfig with no home is a no-op", () => {
+  expect(ensureUserConfig("")).toBeUndefined();
 });

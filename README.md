@@ -131,6 +131,11 @@ known); add shared names to the user-level config. To expose a raw model id
 in the palette, map it to itself:
 `"deepseek/deepseek-v4-pro": "deepseek/deepseek-v4-pro"`.
 
+The file is created for you with the shipped palette above — on the MCP
+server's first start (a plugin install runs no scripts, so that is the
+install moment), and likewise from the `dispatch` CLI and `--doctor`. It is
+never overwritten once it exists.
+
 ### Locking it down with `allow`
 
 The enum constrains callers, but agent definitions pinning `model:` and the

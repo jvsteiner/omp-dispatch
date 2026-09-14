@@ -1,4 +1,5 @@
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, writeFileSync, renameSync } from "node:fs";
+import { join } from "node:path";
 
 export interface TierConfig {
   tiers: Record<string, string>;
@@ -63,6 +64,46 @@ export function loadTierConfig(paths: string[]): TierConfig {
     }
   }
   return cfg;
+}
+
+/**
+ * Create `~/.omp-dispatch/config.json` with the shipped palette if — and only
+ * if — it does not exist yet. A fresh install otherwise leaves the user with
+ * nothing to edit: loadTierConfig silently falls back to in-code defaults, so
+ * the file a user is told to configure never comes into being. The MCP
+ * server's first start is the install moment (plugin installs run no
+ * scripts), so that is when this runs — plus the CLI and doctor, the other
+ * two doors.
+ *
+ * Never overwrites: once the file exists it is the user's, even if it still
+ * holds shipped values. Write is tmp-then-rename so a concurrent Claude and
+ * Codex start can't observe a half-written config. Write failures (read-only
+ * home) are returned, not thrown — the loader's default fallback keeps
+ * everything working, so creation is best-effort everywhere but doctor,
+ * which reports it.
+ */
+export function ensureUserConfig(
+  home: string,
+): { path: string; created: boolean; error?: string } | undefined {
+  if (!home) return undefined;
+  const dir = join(home, ".omp-dispatch");
+  const path = join(dir, "config.json");
+  if (existsSync(path)) return { path, created: false };
+  try {
+    mkdirSync(dir, { recursive: true });
+    const content = JSON.stringify({
+      tiers: Object.fromEntries(
+        Object.entries(DEFAULT_TIERS.tiers).sort(([a], [b]) => a.localeCompare(b)),
+      ),
+      default: DEFAULT_TIERS.default,
+    }, null, 2) + "\n";
+    const tmp = join(dir, `.config.json.tmp-${process.pid}`);
+    writeFileSync(tmp, content);
+    renameSync(tmp, path);
+    return { path, created: true };
+  } catch (e) {
+    return { path, created: false, error: e instanceof Error ? e.message : String(e) };
+  }
 }
 
 /**

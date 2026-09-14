@@ -1,5 +1,6 @@
 import { writeFileSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { ensureUserConfig } from "./models.ts";
 import { loadProviderKeys } from "./env.ts";
 import { startRun } from "./runner.ts";
 import {
@@ -387,6 +388,9 @@ async function cmdDoctor(argv: string[], opts: CliOptions): Promise<number> {
 }
 
 export async function runCli(argv: string[], opts: CliOptions = {}): Promise<number> {
+  // Same first-moment logic as the server: a user reaching for the degraded
+  // path still gets an editable config. Best-effort by construction.
+  ensureUserConfig(process.env.HOME ?? "");
   const command = argv[0];
   const rest = argv.slice(1);
   const handlers: Record<string, (a: string[], o: CliOptions) => Promise<number>> = {

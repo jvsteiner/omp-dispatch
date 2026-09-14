@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { loadProviderKeys } from "../env.ts";
-import { loadTierConfig } from "../models.ts";
+import { ensureUserConfig, loadTierConfig } from "../models.ts";
 import { startRun } from "../runner.ts";
 import {
   AGENT_DEFAULTS, capsFor, DEFAULT_REPORTING_PROMPT, pluginVersion, resolveAgentDef,
@@ -57,6 +57,10 @@ async function runOmp(args: string[], extraEnv: Record<string, string> = {}): Pr
  * known. Add shared tier names to ~/.omp-dispatch/config.json.
  */
 function modelPaletteSchema(home: string) {
+  // The server's first start is a fresh install's first moment (plugin
+  // installs run no scripts), so this is where the editable config comes
+  // into being — with the shipped palette, only if absent.
+  ensureUserConfig(home);
   const cfg = loadTierConfig([join(home, ".omp-dispatch", "config.json")]);
   const names = Object.keys(cfg.tiers).sort();
   return z.enum(names as [string, ...string[]]).optional().describe(

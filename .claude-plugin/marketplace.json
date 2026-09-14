@@ -9,7 +9,7 @@
     {
       "name": "omp-dispatch",
       "description": "Drop-in replacement for native Claude subagents, running on omp.",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "source": "./",
       "category": "development"
     }

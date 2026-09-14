@@ -75,7 +75,7 @@ Requires `omp` and `bun` on PATH.
 | Path | Purpose |
 |---|---|
 | `.claude-plugin/` | Claude manifest and marketplace (also readable by Codex) |
-| `.codex-plugin/plugin.json`, `.mcp.json` | Codex manifest and MCP launch configuration |
+| `.codex-plugin/plugin.json`, `.codex-mcp.json` | Codex manifest and MCP launch configuration |
 | `src/`, `bin/` | Shared runner, lifecycle, MCP server and the `dispatch` CLI |
 | `skills/omp-subagents/` | Delegation workflow for both hosts |
 | `agents/` | Optional Markdown role templates for either host |

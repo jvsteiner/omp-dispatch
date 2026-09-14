@@ -17,6 +17,19 @@ test("Codex and Claude packages share the version, skill and dependency-installi
   expect(existsSync(launcher)).toBe(true);
 });
 
+test("no .mcp.json at the repo root — Claude Code auto-loads that exact name as project config", () => {
+  // A root .mcp.json is project MCP config in Claude Code, not a plugin
+  // artifact: ${CLAUDE_PLUGIN_ROOT} cannot expand there, so the server
+  // registers and immediately fails in every Claude session opened in a
+  // checkout of this repo (observed as a red "✗ failed" MCP entry). Codex's
+  // launch config lives in the file .codex-plugin/plugin.json points at,
+  // which must not carry this name.
+  expect(existsSync(join(root, ".mcp.json"))).toBe(false);
+  const codex = JSON.parse(readFileSync(join(root, ".codex-plugin/plugin.json"), "utf8"));
+  expect(codex.mcpServers).not.toBe("./.mcp.json");
+  expect(existsSync(join(root, codex.mcpServers))).toBe(true);
+});
+
 test("the plugin manifest declares the MCP server and the skills directory", () => {
   const m = JSON.parse(readFileSync(join(root, ".claude-plugin/plugin.json"), "utf8"));
   expect(m.name).toBe("omp-dispatch");

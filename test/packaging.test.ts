@@ -11,23 +11,40 @@ test("Codex and Claude packages share the version, skill and dependency-installi
   expect(codex.name).toBe(claude.name);
   expect(codex.version).toBe(claude.version);
   expect(codex.skills).toBe(claude.skills);
+  // Same launcher, two addressings: Codex gets a plugin-root-relative path
+  // (it expands nothing), Claude gets ${CLAUDE_PLUGIN_ROOT} (its plugin
+  // loader expands it). The detailed contract lives in the test below.
   const mcp = JSON.parse(readFileSync(join(root, codex.mcpServers), "utf8"));
-  expect(mcp.mcpServers["omp-dispatch"]).toEqual(claude.mcpServers["omp-dispatch"]);
-  const launcher = mcp.mcpServers["omp-dispatch"].args[0].replace("${CLAUDE_PLUGIN_ROOT}", root);
-  expect(existsSync(launcher)).toBe(true);
+  expect(mcp.mcpServers["omp-dispatch"].command).toBe(claude.mcpServers["omp-dispatch"].command);
+  const relative = mcp.mcpServers["omp-dispatch"].args[0];
+  expect(existsSync(join(root, relative))).toBe(true);
 });
 
-test("no .mcp.json at the repo root — Claude Code auto-loads that exact name as project config", () => {
-  // A root .mcp.json is project MCP config in Claude Code, not a plugin
-  // artifact: ${CLAUDE_PLUGIN_ROOT} cannot expand there, so the server
-  // registers and immediately fails in every Claude session opened in a
-  // checkout of this repo (observed as a red "✗ failed" MCP entry). Codex's
-  // launch config lives in the file .codex-plugin/plugin.json points at,
-  // which must not carry this name.
-  expect(existsSync(join(root, ".mcp.json"))).toBe(false);
+test("the two hosts' launch contracts both hold: relative .mcp.json for Codex, inline variable for Claude", () => {
+  // Codex (verified against its binary: no ${...} expansion exists, and its
+  // plugin validator pins the mcpServers contract to exactly ".mcp.json")
+  // resolves plugin MCP args RELATIVE TO THE PLUGIN ROOT. A variable path
+  // here is what kept every Codex session on the CLI fallback — bun received
+  // the literal "${CLAUDE_PLUGIN_ROOT}/bin/server.ts" and died.
   const codex = JSON.parse(readFileSync(join(root, ".codex-plugin/plugin.json"), "utf8"));
-  expect(codex.mcpServers).not.toBe("./.mcp.json");
-  expect(existsSync(join(root, codex.mcpServers))).toBe(true);
+  expect(codex.mcpServers).toBe("./.mcp.json");
+  const mcp = JSON.parse(readFileSync(join(root, ".mcp.json"), "utf8"));
+  const entry = mcp.mcpServers["omp-dispatch"];
+  expect(entry.args.join(" ")).not.toContain("${");
+  expect(entry.args[0]).toMatch(/^\.\//);       // relative to the plugin root
+
+  // Claude Code expands ${CLAUDE_PLUGIN_ROOT} in its own inline plugin
+  // manifest — the one place the variable is actually supported — and its
+  // plugin cache is never a project root, so the variable is correct there.
+  const claude = JSON.parse(readFileSync(join(root, ".claude-plugin/plugin.json"), "utf8"));
+  expect(claude.mcpServers["omp-dispatch"].args[0]).toContain("${CLAUDE_PLUGIN_ROOT}");
+
+  // A checkout's root .mcp.json is ALSO auto-loadable project config in
+  // Claude Code; the relative path makes even that work, but a duplicate
+  // server beside the plugin's is noise — the project settings file declines
+  // it once, for everyone who works in a checkout.
+  const settings = JSON.parse(readFileSync(join(root, ".claude", "settings.json"), "utf8"));
+  expect(settings.disabledMcpjsonServers).toContain("omp-dispatch");
 });
 
 test("the plugin manifest declares the MCP server and the skills directory", () => {

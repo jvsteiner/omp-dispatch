@@ -1,6 +1,6 @@
 {
   "name": "omp-dispatch",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "Delegate Codex work to external omp agents using configurable providers and models.",
   "author": {
     "name": "Jamie Steiner"
@@ -8,7 +8,7 @@
   "repository": "https://github.com/jvsteiner/omp-dispatch",
   "license": "MIT",
   "skills": "./skills/",
-  "mcpServers": "./.codex-mcp.json",
+  "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "OMP Dispatch",
     "shortDescription": "External omp agents for Codex",

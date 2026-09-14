@@ -31,11 +31,15 @@ codex plugin add omp-dispatch@omp-dispatch
 The existing `.claude-plugin/marketplace.json` is a supported legacy marketplace
 and points to the repository root. Codex selects `.codex-plugin/plugin.json`;
 Claude Code selects `.claude-plugin/plugin.json`. Both load the same skill and
-launcher. `.codex-mcp.json` (named so Claude Code never auto-loads it — a
-root `.mcp.json` is treated as *project* MCP config, where
-`${CLAUDE_PLUGIN_ROOT}` cannot expand and the server just fails) uses Codex's
-supported `CLAUDE_PLUGIN_ROOT` compatibility variable to locate the installed
-launcher.
+launcher, but they address it differently, and the difference is load-bearing:
+Codex expands no variables at all (verified against its binary — there is no
+`${...}` support), so its `.mcp.json` names the launcher RELATIVE TO THE
+PLUGIN ROOT (`./bin/server.ts`). Claude Code does expand
+`${CLAUDE_PLUGIN_ROOT}`, but only inside its own plugin manifest, which is why
+the Claude manifest carries the variable inline and the shared file does not.
+Working in a checkout of this repo, Claude Code may offer the root `.mcp.json`
+as a project server; the committed `.claude/settings.json` declines it so the
+plugin's server is the only one registered.
 
 Open a new Codex conversation after installation. Invoke `$omp-subagents` and
 ask it to call `omp_ping`, then delegate a small read-only task. If the app

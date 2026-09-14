@@ -2,7 +2,7 @@
   "mcpServers": {
     "omp-dispatch": {
       "command": "bun",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/bin/server.ts"]
+      "args": ["./bin/server.ts"]
     }
   }
 }

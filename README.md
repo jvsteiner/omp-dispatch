@@ -42,8 +42,9 @@ Run controls:
   tier is catchable at dispatch time — and `omp_task_output` accepts
   **`include_diff`** to return a run's git diff with its report.
 - Definition-less dispatches run under a **fire-and-forget reporting
-  contract**: one terse reply — changed files, verifying command output,
-  failures with raw output. No narration, no causal theories.
+  contract**: one reply, at most three bullets — changed files, verifying
+  command output, failures with raw output (each omitted when empty). No
+  narration, no restated diff, no causal theories.
 - A dispatch that fails **explains itself**: the doctor's findings ride
   along with the error, one call instead of two.
 

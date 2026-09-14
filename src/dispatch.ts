@@ -39,21 +39,21 @@ export const AGENT_DEFAULTS = {
  * The contract every definition-less dispatch runs under: fire-and-forget.
  * The dispatch's whole value is that the caller stops paying attention, so
  * the agent's single reply is the entire deliverable — not the opening of a
- * conversation, and not a place to narrate process. Two observed failure
- * modes motivated it: reports longer than the change they describe, and
- * confident causal theories ("failed because of tool shadowing") with
- * nothing observed behind them.
+ * conversation, and not a place to narrate process. Three observed failure
+ * modes shaped it (a 52-word report on a one-line diff, restating the
+ * diff's content, listing prohibited actions never taken), plus one design
+ * flaw: a relative-length rule cannot hold when the verifying output alone
+ * outgrows a one-line change. Hence an absolute bullet cap.
  */
 export const DEFAULT_REPORTING_PROMPT = [
   "You are dispatched fire-and-forget. This one reply is the entire deliverable:",
-  "nobody will answer it, nobody will ask you a follow-up, and the caller reads",
-  "the diff. Terse, in this order:",
-  "1. what changed (files)",
+  "nobody will answer it, nobody will ask a follow-up, and the caller reads the diff.",
+  "At most three bullets:",
+  "1. what changed — file names only; never restate what the diff already shows",
   "2. what verifies it — the commands you ran and their actual output",
-  "3. anything that failed, with its raw output, and no cause you did not establish",
-  "",
-  "Do not restate the brief, narrate your process, or explain false starts.",
-  "A report longer than the diff is wrong. If the diff says it, don't.",
+  "3. what failed — its raw output, and no cause you did not establish",
+  "Omit any bullet you have nothing for. Do not restate the brief, narrate your",
+  "process, explain false starts, or list things you did not do.",
 ].join("\n");
 
 /**

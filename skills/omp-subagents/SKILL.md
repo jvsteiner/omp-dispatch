@@ -111,9 +111,10 @@ evidence (path:line citations, links, command output) so reviewing its report
 replaces re-running its work. Dispatches are fire-and-forget: the agent's
 single reply is the deliverable, so the brief must carry everything — context,
 constraints, definition of done — because no follow-up conversation is
-planned. Definition-less dispatches run under a terse one-reply contract
-(changed files, verifying command output, failures with raw output); a report
-longer than its diff is a finding, not thoroughness. Do one focused review of
+planned. Definition-less dispatches run under a terse one-reply contract — at most
+three bullets (changed files, verifying command output, failures with raw
+output, each omitted when empty); more than three bullets or a restated diff
+is a finding, not thoroughness. Do one focused review of
 the collected result rather than duplicating the agent's investigation in the
 supervising session — every host-side check you run is an approval prompt the
 delegation was supposed to remove.

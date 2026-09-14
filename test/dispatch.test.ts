@@ -178,7 +178,7 @@ test("a definition-less dispatch runs under the fire-and-forget reporting contra
     const argv = JSON.parse(readFileSync(dump, "utf8")).argv as string[];
     const promptArg = argv.find((a: string) => a.includes("fire-and-forget"));
     expect(promptArg).toBeDefined();
-    expect(promptArg).toContain("A report longer than the diff is wrong");
+    expect(promptArg).toContain("At most three bullets");
   } finally {
     delete process.env.FAKE_OMP_DUMP;
   }

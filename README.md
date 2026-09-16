@@ -41,6 +41,20 @@ Run controls:
 - A background start acknowledges the resolved **model and caps** — a wrong
   tier is catchable at dispatch time — and `omp_task_output` accepts
   **`include_diff`** to return a run's git diff with its report.
+- **`omp_wait`** waits on a set of runs at once — first to settle (default)
+  or all — returning early the moment the condition is met, with a per-run
+  status line (tool calls, cost, liveness age) on timeout. The polling
+  primitive for fan-outs.
+- Foreground calls are **block-bounded**: `omp_agent` and `omp_send_message`
+  return a handoff ("still running, collect with omp_task_output") after
+  ~55s instead of letting a host's MCP call timeout kill them mid-flight —
+  the failure mode behind Codex's duplicated task notifications. Raise or
+  lower the bound with `OMP_DISPATCH_BLOCK_MS`; Claude Code is detected and
+  keeps true blocking.
+- A settled report is **served in full once per session**: later fetches get
+  a compact tombstone with the footer and pointers (the diff surface stays
+  available via `include_diff`), so a re-collect never re-bills the same
+  tokens.
 - Definition-less dispatches run under a **fire-and-forget reporting
   contract**: one reply, at most three bullets — changed files, verifying
   command output, failures with raw output (each omitted when empty). No
@@ -185,7 +199,16 @@ A cap firing is a result, not an error: the run returns its report with
 
 `isolation: "worktree"` gives a run its own git checkout. An unchanged worktree
 is cleaned up afterwards; one the agent left work in is kept and its path
-reported.
+reported, with the branch (`omp-dispatch/<run_id>`) and base repo recorded in
+the footer — that branch is what you merge.
+
+**One shared workdir holds one in-flight run.** A second dispatch into a
+workdir whose previous run is still running (or parked on a question) is
+refused, naming the run — two agents interleaving writes and commits in one
+directory corrupt each other's verification. Dispatch concurrently with
+`isolation: "worktree"`, or wait for the busy run to settle. Sequential runs
+in one workdir are unaffected. `omp_list_agents` shows every run's workdir
+(`worktree-of=…` when isolated).
 
 ## Where run state lives, and how it is cleaned
 

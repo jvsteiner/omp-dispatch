@@ -58,13 +58,29 @@ export const DEFAULT_REPORTING_PROMPT = [
 
 /**
  * One live-status line for a run that has not settled, shared by
- * omp_task_output and the CLI so a poll answers "is it working, how far,
- * how much" instead of just "running".
+ * omp_task_output, omp_wait and the CLI so a poll answers "is it working, how
+ * far, how much" instead of just "running".
+ *
+ * `turns` only moves on a TERMINAL agent_end — a hundred-tool-call run sits
+ * at turns=0 until its final frame — so the signals that actually track an
+ * in-flight run are tool_calls (refreshed from stats every poll), the age of
+ * the newest liveness evidence, and elapsed against the wall-clock budget.
  */
-export function runningStatus(name: string, result: RunResult, runDir: string): string {
+export function runningStatus(
+  name: string,
+  result: RunResult,
+  runDir: string,
+  opts: { maxSeconds?: number | null; lastFrame?: { ageMs: number; kind: string } | null } = {},
+): string {
   const elapsed = Math.max(0, Math.round((Date.now() - statSync(runDir).birthtimeMs) / 1000));
+  const budget = opts.maxSeconds && opts.maxSeconds > 0 ? `/${opts.maxSeconds}s` : "";
+  const frame = opts.lastFrame
+    ? ` last_frame=${Math.max(0, Math.round(opts.lastFrame.ageMs / 1000))}s` +
+      (opts.lastFrame.kind ? `(${opts.lastFrame.kind.replace(/^ame:/, "")})` : "")
+    : "";
   return `run '${name}': state=${result.state} turns=${result.turns} ` +
-    `cost_usd=${result.cost_usd.toFixed(4)} elapsed=${elapsed}s` +
+    `tool_calls=${result.tool_calls} cost_usd=${result.cost_usd.toFixed(4)} ` +
+    `elapsed=${elapsed}s${budget}${frame}` +
     (result.ask ? ` question=${JSON.stringify(result.ask)}` : "");
 }
 /**

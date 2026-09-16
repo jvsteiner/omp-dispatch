@@ -163,7 +163,7 @@ test("a poll of a running dispatch shows turns, cost and elapsed, not just state
   });
   const r: any = await call(c, "omp_task_output", { name: "live", wait_seconds: 0.01 });
   const text = r.content[0].text as string;
-  expect(text).toMatch(/state=running turns=\d+ cost_usd=[\d.]+ elapsed=\d+s/);
+  expect(text).toMatch(/state=running turns=\d+ tool_calls=\d+ cost_usd=[\d.]+ elapsed=\d+s(\/\d+s)?/);
   // the log answers "is it working", not just "is it alive"
   expect(text).toContain("START deepseek/deepseek-flash");
   expect(text).toContain("PROMPT submitted");

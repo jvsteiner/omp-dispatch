@@ -91,10 +91,11 @@ Add to the target project's `AGENTS.md`:
 Delegate suitable independent work to the omp-dispatch MCP server using
 omp_agent with run_in_background: true and the absolute project workdir.
 Supply a self-contained brief. Collect results with omp_task_output using
-wait_seconds: 25; answer supervisor questions with omp_answer. Use
-omp_send_message with run_in_background: true for follow-ups on completed runs.
-Use native Codex agents when the task needs host-only tools or context.
-Verify returned diffs and checks before accepting the work.
+wait_seconds: 50, or omp_wait across several runs at once; answer supervisor
+questions with omp_answer. Use omp_send_message with run_in_background: true
+for follow-ups on completed runs. Concurrent runs in one repo need
+isolation: "worktree". Use native Codex agents when the task needs host-only
+tools or context. Verify returned diffs and checks before accepting the work.
 ```
 
 Tool prefixes depend on how Codex exposes the server. Discover by server/tool
@@ -117,18 +118,25 @@ Call `omp_agent`:
 Then call `omp_task_output`:
 
 ```json
-{"name":"retry-review","wait_seconds":25}
+{"name":"retry-review","wait_seconds":50}
 ```
 
 The dispatch acknowledgement names the resolved model and the caps — check it
 against what you intended; a wrong tier is free to fix now (`omp_task_stop`,
 redispatch with `model`) and expensive to discover after the run.
 
-Repeat bounded waits until the report arrives. A pending response includes
-state, progress and any supervisor question. On the final collect, pass
+Repeat bounded waits until the report arrives — a wait returns early the
+moment the run settles, so keep it just under your MCP call timeout. A
+pending response includes state, tool calls, cost, liveness age and any
+supervisor question. Waiting on several runs? `omp_wait` takes them all at
+once and returns the first to settle (or all of them with `all: true`),
+summarizing the rest. On the final collect, pass
 `include_diff: true` to get the run's git-derived diff appended to the report —
 the review is then one read instead of a separate `git diff` (and its
-approval). `omp_list_agents` lists active and finished runs. `omp_usage`
+approval). A settled report is served in full once per session; a re-collect
+returns a compact tombstone (the diff surface stays available).
+`omp_list_agents` lists active and finished runs with their workdirs.
+`omp_usage`
 totals the session's dispatched runs, turns and cost: quote it when reporting
 whether the delegation paid off. `omp_doctor` checks omp's exit status,
 its SQLite databases (models/agent/stats, write-probed — a locked or corrupt
@@ -142,16 +150,24 @@ completion with `omp_send_message`:
 {"to":"retry-review","message":"Also check the tests for missing cases.","run_in_background":true}
 ```
 
-Codex's documented default MCP tool timeout is 60 seconds. Background dispatch
-returns after OMP starts; `omp_task_output` waits at most 30 seconds. Omitting
-background mode retains the existing blocking behavior and may require a
-larger client timeout. Background jobs live only as long as this MCP server;
-they are not durable jobs across Codex restarts. Artifacts remain on disk.
+Codex's documented default MCP tool timeout is 60 seconds. Foreground
+`omp_agent` / `omp_send_message` calls are block-bounded to ~55s by default:
+a run that outlasts the bound returns a handoff acknowledgement ("still
+running, collect with omp_task_output") instead of being killed mid-call and
+re-delivered as a duplicate task notification. Raise the bound with
+`OMP_DISPATCH_BLOCK_MS` if your timeout is configured higher. Background
+dispatch still returns after OMP starts. Background jobs live only as long
+as this MCP server; they are not durable jobs across Codex restarts.
+Artifacts remain on disk.
 
 `isolation: "worktree"` starts from committed HEAD. Dirty worktrees are kept
-and their paths reported; nothing is automatically merged. Clean worktrees
-are removed after the initial run: start a new run if more isolated work is
-needed. Shared-directory runs can be continued in the same server session.
+and their paths reported (branch `omp-dispatch/<run_id>` and base repo in the
+footer); nothing is automatically merged. Clean worktrees are removed after
+the initial run: start a new run if more isolated work is needed.
+Shared-directory runs can be continued in the same server session — but only
+one in-flight run per shared workdir: a concurrent second dispatch there is
+refused, naming the holder, because interleaved writes and commits corrupt
+each other's verification.
 
 ## Roles and models
 

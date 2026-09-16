@@ -26,6 +26,16 @@ export interface RunResult {
   files_changed: string[];
   last_reply: string | null;
   ask: { ask_id: string; question: string; context?: string } | null;
+  /**
+   * The directory the agent actually ran in — the worktree path when the run
+   * was isolated. The key the concurrent-workdir guard compares, and what a
+   * disk resume needs. Null on runs recorded before this field existed.
+   */
+  workdir: string | null;
+  /** The base repository path when the run ran in a worktree; null otherwise. */
+  worktree_base: string | null;
+  /** The run's wall-clock cap, so a live status line can show elapsed/budget. */
+  max_seconds: number | null;
 }
 
 let counter = 0;
@@ -110,6 +120,7 @@ export function emptyResult(runId: string): RunResult {
     run_id: runId, name: null, state: "running", stopped_because: null,
     turns: 0, tool_calls: 0, cost_usd: 0, seconds: 0,
     model: null, session_file: null, files_changed: [], last_reply: null, ask: null,
+    workdir: null, worktree_base: null, max_seconds: null,
   };
 }
 

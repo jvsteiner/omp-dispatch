@@ -39,24 +39,33 @@ absolute project `workdir`; an MCP server's own working directory may differ.
 The returned name identifies the run for all subsequent calls. Supply a
 self-contained brief: goal, relevant paths, constraints, permitted changes,
 acceptance checks and expected output. Conversation history is not forwarded.
-For concurrent writers, assign disjoint files or use `isolation: "worktree"`.
-Worktrees start from committed HEAD; account for required local changes
-before relying on them in an isolated run.
+For concurrent work in one repo, dispatch every concurrent run with
+`isolation: "worktree"` — a shared workdir is refused while one of its runs
+is still in flight, because interleaved writes and commits corrupt each
+other's verification. Worktrees start from committed HEAD; account for
+required local changes before relying on them in an isolated run.
 
-Collect with `omp_task_output({"name":"retry-review","wait_seconds":25})`.
+Collect with `omp_task_output({"name":"retry-review","wait_seconds":50})`.
 It returns status and progress while active, a question when asking, and the
-final report when finished; pass `include_diff: true` to get the run's
+final report when finished; a wait returns early the moment the run settles,
+so keep it just under your client's MCP call timeout (the schema allows up
+to 110s). Pass `include_diff: true` to get the run's
 git-derived diff appended to a settled report, so reviewing it needs no
-separate git call. Waits are capped at 30 seconds to fit Codex's MCP
-timeout. Do useful independent work between polls; otherwise use a bounded
-wait. Continue collecting until the requested work has settled.
+separate git call. A settled report is served in full once per session — a
+re-collect returns a compact tombstone, with the diff still available via
+`include_diff`. Waiting on several runs? `omp_wait` takes them all at once
+and returns the first to settle (or all with `all: true`), summarizing the
+rest one line each. Do useful independent work between polls; otherwise use
+a bounded wait or omp_wait.
 
 The start acknowledgement names the resolved model and caps. Read it: a
 wrong tier is free to fix at dispatch time (`omp_task_stop`, then dispatch
 again with another `model:` tier) and expensive to discover after the run.
 
-`omp_agent` and `omp_send_message` remain blocking when `run_in_background`
-is omitted, for existing Claude Code workflows.
+`omp_agent` and `omp_send_message` without `run_in_background` block until
+the run settles or a host-safe bound (~55s; Claude Code keeps true blocking)
+elapses — a long run then returns a handoff telling you how to collect, so a
+host MCP timeout can never kill the call and re-deliver its result twice.
 
 ## Tools
 
@@ -66,6 +75,7 @@ is omitted, for existing Claude Code workflows.
 | `omp_send_message` | Continue a completed run using `to`, `message`, and background mode |
 | `omp_list_agents` | List this server session's runs, states, turns and costs |
 | `omp_task_output` | Collect report, progress or pending question; `wait_seconds`, `include_diff` |
+| `omp_wait` | Wait on several runs at once — first to settle or `all: true`; per-run status on timeout |
 | `omp_task_stop` | Stop a run by `name` |
 | `omp_steer` | Correct an active run using `to` and `message` |
 | `omp_answer` | Answer a supervisor question using `name` and `text` |

@@ -23,8 +23,10 @@ export interface RunOptions {
   systemPrompt?: string;
   /** Paths under workdir to make read-only for the run. Off by default. */
   readonly?: string[];
-  /** The agent definition's body, appended to omp's own system prompt. */
-  systemPrompt?: string;
+  /** Extra env for the child omp process — provider keys from shell rc files. */
+  env?: Record<string, string>;
+  /** How to launch omp, overriding the default `omp` lookup. Tests use this. */
+  command?: string[];
   /**
    * Resume a saved omp conversation instead of starting a new one — the
    * durability path: omp_send_message on a completed on-disk run after a
@@ -50,6 +52,14 @@ export interface RunHandle {
   stop(): Promise<void>;
   /** Answer a parked ask_supervisor question. False if none is waiting by that id. */
   answer(askId: string, text: string): boolean;
+  /** The run's wall-clock cap in seconds — what `max_seconds` settles by. */
+  maxSeconds: number;
+  /**
+   * Age and kind of the newest liveness evidence (a session frame or cost
+   * movement — the dead-air watchdog's own clock), for live status lines.
+   * Null until the first evidence arrives.
+   */
+  lastFrame: { ageMs: number; kind: string } | null;
   /** Settle if still running, then kill omp and everything it spawned. */
   dispose(): Promise<void>;
 }
@@ -137,6 +147,9 @@ export async function startRun(
 ): Promise<RunHandle> {
   const result = emptyResult(runId);
   result.name = opts.name ?? null;
+  // Persisted so a status line read from disk (CLI, restart survival) can
+  // show elapsed against the budget the run was dispatched with.
+  result.max_seconds = opts.maxSeconds;
   const readonly = opts.readonly ?? [];
   const caps: Caps = {
     maxTurns: opts.maxTurns, maxUsd: opts.maxUsd, maxSeconds: opts.maxSeconds,
@@ -189,6 +202,7 @@ export async function startRun(
     };
     return {
       runId, runDir, result, settled: Promise.resolve(result),
+      maxSeconds: opts.maxSeconds, lastFrame: null,
       say: neverStarted, steer: neverStarted, answer: () => false,
       stop: async () => {}, dispose: async () => {},
     };
@@ -782,6 +796,11 @@ export async function startRun(
     runId,
     runDir,
     result,
+    maxSeconds: opts.maxSeconds,
+    // Live liveness read-out for status lines; see the interface doc.
+    get lastFrame() {
+      return lastActivityAt === 0 ? null : { ageMs: Date.now() - lastActivityAt, kind: lastEventKind };
+    },
     // A getter, not a captured value: a resumed run installs a NEW settle
     // promise, and a caller holding the old one would wait forever.
     get settled() { return done; },

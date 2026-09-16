@@ -195,15 +195,18 @@ test("a raw model id is refused by the schema before anything runs", async () =>
 }, 30_000);
 
 test("two concurrent dispatches get distinct names", async () => {
-  const workdir = tmpWorkdir();
+  // Distinct workdirs: one shared workdir holds one in-flight run now, and
+  // name uniqueness is this test's subject, not workdir contention.
+  const workdirA = tmpWorkdir();
+  const workdirB = tmpWorkdir();
   scriptEnv({});
   const client = await connect();
   const [a, b]: any[] = await Promise.all([
     client.callTool({
-      name: "omp_agent", arguments: { description: "same task", prompt: "go", workdir },
+      name: "omp_agent", arguments: { description: "same task", prompt: "go", workdir: workdirA },
     }),
     client.callTool({
-      name: "omp_agent", arguments: { description: "same task", prompt: "go", workdir },
+      name: "omp_agent", arguments: { description: "same task", prompt: "go", workdir: workdirB },
     }),
   ]);
   expect(a.isError).toBeFalsy();

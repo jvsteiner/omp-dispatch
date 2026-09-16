@@ -4,7 +4,7 @@ import { ensureUserConfig } from "./models.ts";
 import { loadProviderKeys } from "./env.ts";
 import { startRun } from "./runner.ts";
 import {
-  newRunId, createRunDir, listRuns, readResult, readDiff,
+  newRunId, createRunDir, listRuns, readResult, readDiff, writeResult,
   type RunResult, type RunListing,
 } from "./rundir.ts";
 import { createWorktree, type Worktree } from "./worktree.ts";
@@ -215,6 +215,14 @@ async function cmdStart(argv: string[], opts: CliOptions): Promise<number> {
     runId,
   );
 
+  // Same fields the MCP server records (see omp_agent): the directory the
+  // agent works in, the repo it was isolated from, for the guard, listings
+  // and disk resumes.
+  handle.result.workdir = targetWorkdir;
+  handle.result.worktree_base = worktree ? baseWorkdir : null;
+  writeResult(runDir, handle.result);
+
+
   // The CLI process is the monitor, so stopping the run IS stopping this
   // process — but through the handle, which unlocks paths and writes a
   // result, unlike a kill. A second signal means the user wants out NOW.
@@ -238,7 +246,13 @@ async function cmdStart(argv: string[], opts: CliOptions): Promise<number> {
         : `\n[omp:${name}] worktree kept — the agent left work in ${path}`;
     }
     out((result.last_reply ?? "(no reply)") +
-      resultFooter(name, result, { modelLabel: model, runDir }) + isolationNote + "\n");
+      resultFooter(name, result, {
+        modelLabel: model, runDir,
+        ...(worktree ? { extra: {
+          worktree_branch: `omp-dispatch/${runId}`,
+          worktree_base: baseWorkdir,
+        } } : {}),
+      }) + isolationNote + "\n");
     if (result.state === "error") {
       // Self-diagnosing failure, same rationale as omp_agent's error path:
       // the doctor rides along with the failure, one command and one
@@ -298,7 +312,8 @@ async function cmdOutput(argv: string[], opts: CliOptions): Promise<number> {
 
   const log = join(run.dir, "progress.log");
   const lines = existsSync(log) ? readFileSync(log, "utf8").split("\n").filter(Boolean) : [];
-  out(runningStatus(result.name ?? run.runId, result, run.dir) + "\n" +
+  out(runningStatus(result.name ?? run.runId, result, run.dir,
+    { maxSeconds: result.max_seconds }) + "\n" +
     (lines.length
       ? lines.slice(-(Number(flags["lines"] ?? 40))).join("\n")
       : "No progress log yet.") + "\n");

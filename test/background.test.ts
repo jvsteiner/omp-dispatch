@@ -50,7 +50,13 @@ test("background dispatch returns while running, bounded polling collects the fi
   expect(result.isError).toBeFalsy();
   expect(result.content[0].text).toContain("the final answer");
   expect(result.content[0].text).toContain("stopped_because=completed");
-  expect(await output(c, 0)).toEqual(result);
+  // Served in full once; a re-collect gets the tombstone, not a second copy
+  // of the same report.
+  const again = await output(c, 0);
+  expect(again.isError).toBeFalsy();
+  expect(again.content[0].text).toContain("already delivered this session");
+  expect(again.content[0].text).toContain("stopped_because=completed");
+  expect(again.content[0].text).not.toContain("the final answer");
 });
 
 test("background follow-up runs another turn and replaces the collected report", async () => {
@@ -118,5 +124,5 @@ test("Codex can use a neutral role definition and polling rejects excessive wait
   expect((await start(c, { workdir, subagent_type: "reader" })).isError).toBeFalsy();
   expect(existsSync(join(workdir, ".claude"))).toBe(false);
   expect((await output(c)).content[0].text).toContain("turns=1");
-  expect((await output(c, 31)).isError).toBe(true);
+  expect((await output(c, 111)).isError).toBe(true);
 });

@@ -17,13 +17,12 @@ OMP supplies the external harness as well as its model.
 
 ## Install from this checkout
 
-Requires Bun, OMP and working OMP provider authentication on the machine where
-Codex runs. Install dependencies before connecting, so the first MCP startup
-does not spend Codex's default 10-second startup allowance downloading packages:
+Requires Bun, OMP installed as a Bun package (`bun install -g
+@oh-my-pi/pi-coding-agent`, version `^18.1.17`) and working OMP provider
+authentication on the machine where Codex runs. The plugin ships as one
+bundled file, so there is nothing else to install:
 
 ```bash
-cd /absolute/path/to/omp-dispatch
-bun install --frozen-lockfile
 codex plugin marketplace add /absolute/path/to/omp-dispatch
 codex plugin add omp-dispatch@omp-dispatch
 ```
@@ -35,7 +34,7 @@ launcher, but they address it differently, and the difference is load-bearing:
 Codex expands no variables at all (verified against its binary — there is no
 `${...}` support). Its `.mcp.json` anchors the launch with `"cwd": "./"` —
 resolved against the plugin root at load time — and names the launcher
-relative to that cwd (`bin/server.ts`). Args alone are process-cwd-relative,
+relative to that cwd (`dist/server.js`). Args alone are process-cwd-relative,
 which only works by accident inside a checkout of this repo. Claude Code does expand
 `${CLAUDE_PLUGIN_ROOT}`, but only inside its own plugin manifest, which is why
 the Claude manifest carries the variable inline and the shared file does not.
@@ -52,15 +51,8 @@ After publishing these changes, the marketplace can also be added using
 `codex plugin marketplace add jvsteiner/omp-dispatch`. For updates use
 `codex plugin marketplace upgrade omp-dispatch`, then start a new conversation.
 
-After an install or an update, pre-warm the launcher once so the first MCP
-start of a new conversation spends its budget on protocol, not packages:
-
-```bash
-bun /absolute/path/to/omp-dispatch/bin/server.ts --bootstrap
-```
-
 If the server ever fails to start or the `omp_*` tools are missing, run
-`bun /absolute/path/to/omp-dispatch/bin/server.ts --doctor --workdir <project>`
+`bun /absolute/path/to/omp-dispatch/dist/server.js --doctor --workdir <project>`
 — it works without a working server and names what to fix.
 
 ## Manual MCP setup
@@ -71,7 +63,7 @@ For clients without plugin installation, add this to `~/.codex/config.toml`
 ```toml
 [mcp_servers.omp-dispatch]
 command = "bun"
-args = ["/absolute/path/to/omp-dispatch/bin/server.ts"]
+args = ["/absolute/path/to/omp-dispatch/dist/server.js"]
 startup_timeout_sec = 120
 tool_timeout_sec = 60
 ```
@@ -201,19 +193,18 @@ actual savings depend on the selected provider and task.
 
 ## When the server will not start
 
-`bun <plugin-root>/bin/server.ts --doctor --workdir <project>` runs the same
+`bun <plugin-root>/dist/server.js --doctor --workdir <project>` runs the same
 checks as `omp_doctor` with no working server required — use it first; it
-names what to fix. After an install or update, `--bootstrap` installs
-dependencies off the MCP startup path.
+names what to fix.
 
 If the server is unavailable for the rest of the session, the `dispatch` CLI
 in the plugin root reads and writes the same run directories:
 
 ```bash
-bun <plugin-root>/bin/dispatch start --prompt-file brief.md --workdir /absolute/path/to/project
+bun <plugin-root>/dist/dispatch.js start --prompt-file brief.md --workdir /absolute/path/to/project
 # or pipe it: dispatch start --prompt - --workdir ... < brief.md
-bun <plugin-root>/bin/dispatch output latest --workdir /absolute/path/to/project --diff
-bun <plugin-root>/bin/dispatch usage --workdir /absolute/path/to/project
+bun <plugin-root>/dist/dispatch.js output latest --workdir /absolute/path/to/project --diff
+bun <plugin-root>/dist/dispatch.js usage --workdir /absolute/path/to/project
 ```
 
 `start` runs in the foreground (monitor it, or background the shell task);

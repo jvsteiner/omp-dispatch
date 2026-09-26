@@ -1,5 +1,6 @@
 import { test, expect } from "bun:test";
-import { readFileSync, existsSync, readdirSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseAgentDef } from "../src/agentdef.ts";
 
@@ -26,7 +27,7 @@ test("the two hosts' launch contracts both hold: cwd-anchored .mcp.json for Code
   // and resolves the server's cwd field against the PLUGIN ROOT at load
   // time — while args resolve against the *process* cwd. So the anchor is
   // the cwd field, and the args must be relative to IT: "cwd": "./" +
-  // "bin/server.ts". A bare relative arg (0.2.5) only worked in a checkout
+  // "dist/server.js". A bare relative arg (0.2.5) only worked in a checkout
   // of this very repo, because the repo happened to contain the path.
   const codex = JSON.parse(readFileSync(join(root, ".codex-plugin/plugin.json"), "utf8"));
   expect(codex.mcpServers).toBe("./.mcp.json");
@@ -109,14 +110,41 @@ test("the README exists and explains how to turn this on", () => {
   expect(r.toLowerCase()).toContain("claude.md");
 });
 
-test("the manifest launches the dependency-installing launcher, not src directly", () => {
-  const m = JSON.parse(readFileSync(join(root, ".claude-plugin/plugin.json"), "utf8"));
-  const args: string[] = m.mcpServers["omp-dispatch"].args;
-  // A marketplace install clones the repo without node_modules, and bundling
-  // breaks omp's native addon loader — so src/mcp/server.ts cannot be the
-  // entry point or a fresh install serves nothing.
-  expect(args[0]).toContain("bin/server.ts");
-  expect(args[0]).not.toContain("src/mcp/server.ts");
+test("both manifests launch the committed bundle", () => {
+  // A marketplace install is a git clone with no install step, so what the
+  // manifests launch must be complete on its own: one bundled file.
+  const claude = JSON.parse(readFileSync(join(root, ".claude-plugin/plugin.json"), "utf8"));
+  expect(claude.mcpServers["omp-dispatch"].args[0]).toBe("${CLAUDE_PLUGIN_ROOT}/dist/server.js");
+  const mcp = JSON.parse(readFileSync(join(root, ".mcp.json"), "utf8"));
+  expect(mcp.mcpServers["omp-dispatch"].args[0]).toBe("dist/server.js");
+  const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  expect(pkg.dependencies ?? {}).toEqual({});
+});
+
+test("dist/ holds the build of the current source", async () => {
+  // Users run the committed bundles, not src/. Rebuild with `bun run build`.
+  // Bundle output varies across bun versions, so the build is pinned: on any
+  // other bun a mismatch would say "stale dist" about unchanged source.
+  const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  const pinned = /^bun@(\d+\.\d+\.\d+)$/.exec(pkg.packageManager ?? "")?.[1];
+  expect(pinned).toBeDefined();
+  if (Bun.version !== pinned) {
+    throw new Error(`dist/ is built with bun ${pinned} (package.json packageManager); this is bun ${Bun.version}. ` +
+      `Run the tests and \`bun run build\` with bun ${pinned}.`);
+  }
+  const tmp = mkdtempSync(join(tmpdir(), "omp-build-"));
+  for (const [entry, out] of [["bin/server.ts", "server.js"], ["bin/dispatch.ts", "dispatch.js"]]) {
+    await Bun.$`bun build ${entry} --target=bun --outfile ${join(tmp, out)}`.cwd(root).quiet();
+    expect(readFileSync(join(root, "dist", out), "utf8")).toBe(readFileSync(join(tmp, out), "utf8"));
+  }
+});
+
+test("the bundle does not contain omp's native addon loader", () => {
+  // RpcClient drags it in, and it cannot load without omp's node_modules;
+  // RpcClient comes from the omp on PATH instead (src/ompinstall.ts).
+  for (const f of ["server.js", "dispatch.js"]) {
+    expect(readFileSync(join(root, "dist", f), "utf8")).not.toContain("pi_natives native addon");
+  }
 });
 
 test("the README documents adding the marketplace before installing", () => {
@@ -166,3 +194,38 @@ test("the MCP server reports the version the package actually is", async () => {
   expect(client.getServerVersion()?.version).toBe(declared);
   await client.close();
 });
+
+test("the bundle's --doctor mode reports and exits without starting a server", async () => {
+  // The shipped entry point, run the way a host or a supervising agent runs
+  // it: the doctor must work from the bundle alone.
+  const p = Bun.spawn(["bun", join(root, "dist/server.js"), "--doctor", "--workdir", root], {
+    stdin: "pipe", stdout: "pipe", stderr: "pipe",
+  });
+  const timer = setTimeout(() => p.kill(), 20_000);
+  const out = await new Response(p.stdout).text();
+  await p.exited;
+  clearTimeout(timer);
+  expect(out).toMatch(/doctor: \d+\/\d+ checks passed/);
+}, 30_000);
+
+test("the bundle serves MCP once: one reply per request", async () => {
+  // src/mcp/server.ts starts itself under `if (import.meta.main)`. Bun
+  // rewrites that to `if (false)` for every module but the bundle entry; if
+  // it ever stopped, a second server would share stdin and answer twice.
+  const p = Bun.spawn(["bun", join(root, "dist/server.js")], {
+    stdin: "pipe", stdout: "pipe", stderr: "pipe",
+  });
+  p.stdin.write(JSON.stringify({
+    jsonrpc: "2.0", id: 1, method: "initialize",
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "0" } },
+  }) + "\n");
+  await p.stdin.flush();
+  await Bun.sleep(1500);
+  p.stdin.end();
+  const timer = setTimeout(() => p.kill(), 10_000);
+  const out = await new Response(p.stdout).text();
+  await p.exited;
+  clearTimeout(timer);
+  const replies = out.split("\n").filter(l => l.includes('"id":1'));
+  expect(replies.length).toBe(1);
+}, 30_000);

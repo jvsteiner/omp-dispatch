@@ -129,7 +129,7 @@ test("omp_doctor reports every dependency of a dispatch", async () => {
   expect(text).toMatch(/(OK|NOTE)\s+providers /);
   expect(text).toMatch(/OK\s+tiers\s+default sonnet -> deepseek\/deepseek-flash/);
   expect(text).toMatch(/OK\s+runs\s+dir\s+writable: /);
-  expect(text).toMatch(/doctor: 7\/7 checks passed/);
+  expect(text).toMatch(/doctor: 8\/8 checks passed/);
 });
 
 test("omp_doctor fails loudly when an omp database cannot be written", async () => {
@@ -147,7 +147,7 @@ test("omp_doctor fails loudly when an omp database cannot be written", async () 
     expect(r.isError).toBe(true);
     expect(r.content[0].text).toContain("FAIL databases");
     expect(r.content[0].text).toContain("file is not a database");
-    expect(r.content[0].text).toMatch(/doctor: [67]\/7 checks passed/);
+    expect(r.content[0].text).toMatch(/doctor: [678]\/8 checks passed/);
   } finally {
     process.env.HOME = originalHome;
   }
@@ -224,7 +224,7 @@ test("a failed dispatch explains itself with the doctor instead of a second call
   expect(r.isError).toBe(true);
   const text = r.content[0].text as string;
   expect(text).toContain("did not complete");
-  expect(text).toMatch(/doctor: [67]\/7 checks passed|FAIL/);
+  expect(text).toMatch(/doctor: [678]\/8 checks passed|FAIL/);
 });
 
 test("a settled run collects with its git diff, and the footer points at diff.patch", async () => {

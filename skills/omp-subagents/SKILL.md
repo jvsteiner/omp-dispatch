@@ -152,13 +152,10 @@ git-derived `files_changed` and the diff, which is most of the reason to
 delegate through this plugin at all.
 
 1. Find the plugin root (the checkout the marketplace cloned).
-2. Run `bun <plugin-root>/bin/server.ts --doctor --workdir <project>` — it
+2. Run `bun <plugin-root>/dist/server.js --doctor --workdir <project>` — it
    works even when the server cannot start, and names what to fix.
-3. After an install or an update, pre-warm once with
-   `bun <plugin-root>/bin/server.ts --bootstrap` so dependency installation
-   never eats the host's MCP startup budget.
-4. Use the `dispatch` CLI in the plugin root for the degraded path:
-   `bun <plugin-root>/bin/dispatch start --prompt-file <brief.md> --workdir <project>`
+3. Use the `dispatch` CLI in the plugin root for the degraded path:
+   `bun <plugin-root>/dist/dispatch.js start --prompt-file <brief.md> --workdir <project>`
    (or `--prompt -` to pipe the brief; foreground; monitor it), then `... dispatch output latest --workdir
    <project> --diff`, `list`, `usage`, `stop`, `doctor` — the same run
    directories on disk, the same reports and footers. Steering and answering

@@ -2,7 +2,7 @@
   "mcpServers": {
     "omp-dispatch": {
       "command": "bun",
-      "args": ["bin/server.ts"],
+      "args": ["dist/server.js"],
       "cwd": "./"
     }
   }

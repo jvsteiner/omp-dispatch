@@ -9,7 +9,7 @@
     "omp-dispatch": {
       "command": "bun",
       "args": [
-        "${CLAUDE_PLUGIN_ROOT}/bin/server.ts"
+        "${CLAUDE_PLUGIN_ROOT}/dist/server.js"
       ]
     }
   },

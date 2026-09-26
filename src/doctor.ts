@@ -7,10 +7,11 @@ import { ensureUserConfig, loadTierConfig } from "./models.ts";
 import { runsRoot } from "./rundir.ts";
 import { discoverAgentDefs } from "./agentdef.ts";
 import { pluginVersion } from "./dispatch.ts";
+import { locateOmp, rpcCheck } from "./ompinstall.ts";
 
 /**
  * Everything a dispatch depends on, checked in one pass. Deliberately
- * importable with no MCP SDK and no omp RPC machinery: `bin/server.ts
+ * importable with no MCP SDK and no omp RPC machinery: `dist/server.js
  * --doctor` runs this in exactly the states where the server itself cannot
  * start, which is the whole point — a doctor that needs a healthy patient is
  * no doctor.
@@ -24,15 +25,13 @@ export interface DoctorReport {
 }
 
 /**
- * Mirrors runner.ts's launcher resolution without importing it: PATH first —
- * the documented requirement — then the package-relative fallback for a
- * checkout whose deps are installed but whose binary was never linked.
- * Pulling runner.ts in here would drag the RpcClient along, and doctor must
- * stay loadable when nothing else is.
+ * The omp a dispatch spawns (ompinstall.ts): the first JS install on PATH,
+ * else the first omp of any kind. The package-relative fallback only exists
+ * in a dev checkout; the shipped bundle has no node_modules to resolve from.
  */
 function findOmp(): { path: string; from: "PATH" | "package" } {
-  const onPath = Bun.which("omp");
-  if (onPath) return { path: onPath, from: "PATH" };
+  const install = locateOmp();
+  if (install) return { path: install.bin, from: "PATH" };
   return {
     path: Bun.fileURLToPath(import.meta.resolve("@oh-my-pi/pi-coding-agent/dist/cli.js")),
     from: "package",
@@ -138,6 +137,12 @@ export async function runDiagnostics(workdir: string): Promise<DoctorReport> {
       `only in ~/.zshrc will not be found.`);
   }
 
+  // The plugin bundle carries no RpcClient; every dispatch imports it from
+  // the omp on PATH (ompinstall.ts). Resolving the path is the check —
+  // importing it here would load omp's native addon into the doctor.
+  const rpc = rpcCheck(locateOmp());
+  (rpc.ok ? ok : fail)("rpc", rpc.detail);
+
   // Key NAMES only — never values. A provider with no key at all can still be
   // subscription-billed, so absence is a note, not a failure.
   const envKeyNames = Object.keys(process.env)
@@ -205,7 +210,8 @@ export async function runDiagnostics(workdir: string): Promise<DoctorReport> {
     }
   }
 
-  const total = 7;
+  // Every check prints exactly one line, so the header aside, lines are checks.
+  const total = lines.length - 1;
   lines.push(
     `doctor: ${total - failures}/${total} checks passed` +
       (notes > 0 ? ` (${notes} note${notes === 1 ? "" : "s"})` : ""),

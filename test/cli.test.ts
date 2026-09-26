@@ -81,7 +81,7 @@ test("a failed dispatch explains itself with the doctor instead of a second comm
   const err = errs.join("");
   // the run's own footer says what stopped it; the doctor says why
   expect(chunks.join("")).toContain("stopped_because=error");
-  expect(err).toMatch(/doctor: \d\/7 checks passed|FAIL/);
+  expect(err).toMatch(/doctor: \d\/8 checks passed|FAIL/);
 });
 
 test("start refuses a missing prompt instead of dispatching anything", async () => {
@@ -194,7 +194,7 @@ test("usage totals the runs on disk for the workdir", async () => {
 
 test("doctor runs from the CLI and reports the same checks as the tool", async () => {
   const r = await cli(["doctor", "--workdir", mkdtempSync(join(tmpdir(), "omp-cli-work-"))]);
-  expect(r.out).toContain("doctor: 7/7 checks passed");
+  expect(r.out).toContain("doctor: 8/8 checks passed");
   expect(r.code).toBe(0);
 });
 

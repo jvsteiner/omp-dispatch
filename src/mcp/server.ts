@@ -1009,11 +1009,11 @@ export function createServer(opts: CreateServerOptions = {}): McpServer {
 
   server.tool(
     "omp_doctor",
-    "Check everything a dispatch depends on: omp on PATH (exit status), omp's own " +
+    "Check everything a dispatch depends on: omp on PATH (exit status) and its RPC client, omp's own " +
       "SQLite databases (models/agent/stats, write-probed), provider keys, tier " +
       "config, agent definitions and the runs directory. Run this first when omp_* tools are " +
       "missing or misbehaving — it names what to fix. The same checks run without this " +
-      "server via `bun <plugin>/bin/server.ts --doctor`.",
+      "server via `bun <plugin>/dist/server.js --doctor`.",
     {
       workdir: z.string().optional().describe(
         "Absolute project path to check definitions and config for. Defaults to this " +

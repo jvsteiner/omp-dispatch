@@ -36,7 +36,7 @@ Run controls:
 - **`omp_doctor`** checks everything a dispatch depends on — including
   whether omp's own SQLite databases (models, agent state, usage stats) are
   actually writable — and names what to fix. The same checks run without the server:
-  `bun <plugin>/bin/server.ts --doctor`.
+  `bun <plugin>/dist/server.js --doctor`.
 - **`omp_usage`** totals the session's dispatched runs, turns and cost.
 - A background start acknowledges the resolved **model and caps** — a wrong
   tier is catchable at dispatch time — and `omp_task_output` accepts
@@ -89,7 +89,15 @@ To pick up later changes:
 claude plugin marketplace update omp-dispatch
 ```
 
-Requires `omp` and `bun` on PATH.
+Requires `bun` and `omp` on PATH, with omp installed as a Bun package:
+
+```bash
+bun install -g @oh-my-pi/pi-coding-agent
+```
+
+The plugin ships as one bundled file with no dependencies to install. It
+loads omp's RPC client from that omp installation, so a compiled single-file
+omp does not work. omp must be version `^18.1.17`; `--doctor` checks both.
 
 ## Repository layout
 
@@ -98,6 +106,7 @@ Requires `omp` and `bun` on PATH.
 | `.claude-plugin/` | Claude manifest and marketplace (also readable by Codex) |
 | `.codex-plugin/plugin.json`, `.mcp.json` | Codex manifest and MCP launch configuration (plugin-root-relative) |
 | `src/`, `bin/` | Shared runner, lifecycle, MCP server and the `dispatch` CLI |
+| `dist/` | The bundles both hosts run, built from `bin/` and `src/` by `bun run build`. Rebuild after any source change; a packaging test fails when `dist/` is stale. |
 | `skills/omp-subagents/` | Delegation workflow for both hosts |
 | `agents/` | Optional Markdown role templates for either host |
 | `docs/codex.md` | Codex installation, limitations and examples |
@@ -238,17 +247,16 @@ not the summary.
 
 ## When the MCP server is unavailable
 
-`bun <plugin-root>/bin/server.ts --doctor` runs all the `omp_doctor` checks
-with no working server required, and `--bootstrap` installs dependencies off
-the host's MCP startup budget after an install or update.
+`bun <plugin-root>/dist/server.js --doctor` runs all the `omp_doctor` checks
+with no working server required.
 
 The `dispatch` CLI is the degraded path — the same run directories, caps,
 reports and diffs, no server needed:
 
 ```bash
-bun <plugin-root>/bin/dispatch start --prompt-file brief.md --workdir /absolute/project
-bun <plugin-root>/bin/dispatch output latest --workdir /absolute/project --diff
-bun <plugin-root>/bin/dispatch usage --workdir /absolute/project
+bun <plugin-root>/dist/dispatch.js start --prompt-file brief.md --workdir /absolute/project
+bun <plugin-root>/dist/dispatch.js output latest --workdir /absolute/project --diff
+bun <plugin-root>/dist/dispatch.js usage --workdir /absolute/project
 ```
 
 `start` runs in the foreground; `stop` settles a CLI-started run as aborted

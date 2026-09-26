@@ -1,6 +1,7 @@
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { RpcClient, type RpcAgentProcess } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
+import type { RpcAgentProcess, RpcClient } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
+import { loadRpcClient, locateOmp } from "./ompinstall.ts";
 import {
   type RunResult, emptyResult, writeResult, appendProgress, writeDiff,
 } from "./rundir.ts";
@@ -27,6 +28,8 @@ export interface RunOptions {
   env?: Record<string, string>;
   /** How to launch omp, overriding the default `omp` lookup. Tests use this. */
   command?: string[];
+  /** Where the RpcClient class comes from, overriding ompinstall.ts. Tests use this. */
+  loadClient?: () => Promise<typeof RpcClient>;
   /**
    * Resume a saved omp conversation instead of starting a new one — the
    * durability path: omp_send_message on a completed on-disk run after a
@@ -74,7 +77,8 @@ export interface RunHandle {
  * whose dependencies are installed but where the binary was never linked.
  */
 function ompCommand(): string[] {
-  const onPath = Bun.which("omp");
+  // The same install loadRpcClient took its client from (ompinstall.ts).
+  const onPath = locateOmp()?.bin;
   if (onPath) return [onPath];
   try {
     return ["bun", Bun.fileURLToPath(
@@ -163,6 +167,29 @@ export async function startRun(
   // frozen at import time, before a test ever gets a chance to set the env
   // var — found the hard way when a "50ms poll" test took 15 real seconds.
   const pollIntervalMs = Number(process.env.OMP_DISPATCH_POLL_MS) || 15_000;
+
+  // Loaded before anything is written or locked: a compiled or out-of-range
+  // omp fails here, and the run settles as an error with nothing to undo.
+  // Loaded from the omp on PATH, not bundled: see ompinstall.ts.
+  let RpcClientClass: typeof RpcClient;
+  try {
+    RpcClientClass = await (opts.loadClient ?? loadRpcClient)();
+  } catch (e) {
+    result.stopped_because = "error";
+    result.state = "error";
+    writeResult(runDir, result);
+    appendProgress(runDir, `ERROR ${e instanceof Error ? e.message : String(e)}`);
+    appendProgress(runDir, "END error — could not load omp's RpcClient");
+    const neverStarted = async () => {
+      throw new Error(`run ${runId}: never started — could not load omp's RpcClient`);
+    };
+    return {
+      runId, runDir, result, settled: Promise.resolve(result),
+      maxSeconds: opts.maxSeconds, lastFrame: null,
+      say: neverStarted, steer: neverStarted, answer: () => false,
+      stop: async () => {}, dispose: async () => {},
+    };
+  }
 
   writeResult(runDir, result);
 
@@ -336,7 +363,7 @@ export async function startRun(
     appendProgress(runDir, `ASK ${ask.question}`);
   });
 
-  const client = new RpcClient({
+  const client = new RpcClientClass({
     spawn: spawnAgent,
     provider, model: id,
     terminationGraceMs: TERMINATION_GRACE_MS,

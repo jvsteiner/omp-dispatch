@@ -8,7 +8,8 @@ import type { RunResult } from "./rundir.ts";
 export function pluginVersion(): string {
   try {
     // Both host manifests are kept in step with the shared package version.
-    // This module lives in src/, one level down from the root package.json.
+    // import.meta.path is src/dispatch.ts in a checkout and dist/server.js or
+    // dist/dispatch.js in the bundle: one level below package.json either way.
     const manifest = join(dirname(import.meta.path), "..", "package.json");
     return JSON.parse(readFileSync(manifest, "utf8")).version ?? "0.0.0";
   } catch {

@@ -782,3 +782,22 @@ test("say() refuses on an aborted run, naming the reason", async () => {
 
 // Tracing is opt-in; a test that switches it on must not leak it to the next.
 afterEach(() => { delete process.env.OMP_DISPATCH_TRACE; });
+
+test("an RpcClient that cannot load settles the run as an error before anything is locked", async () => {
+  // A compiled omp, or one outside the supported range, makes the load
+  // throw. The run must still settle — not sit in "running" on disk — and
+  // readonly paths must never have been touched.
+  const s = setup({}, {
+    readonly: ["raw"],
+    loadClient: async () => { throw new Error("omp at /x/omp is not a JS install"); },
+  });
+  mkdirSync(join(s.workdir, "raw"));
+  writeFileSync(join(s.workdir, "raw", "a.txt"), "a");
+  const r = await runToSettled(s);
+  expect(r.state).toBe("error");
+  expect(r.stopped_because).toBe("error");
+  expect(statSync(join(s.workdir, "raw", "a.txt")).mode & 0o200).not.toBe(0);
+  const log = readFileSync(join(s.runDir, "progress.log"), "utf8");
+  expect(log).toContain("not a JS install");
+  expect(log).toContain("END error");
+}, 30_000);

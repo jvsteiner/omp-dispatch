@@ -293,3 +293,21 @@ test("the run's chosen name is persisted into result.json for disk readers", asy
   expect(run).toBeDefined();
   expect(existsSync(join(run!.dir, "result.json"))).toBe(true);
 });
+
+test("a provider refusal reaches the caller as an error naming the provider's reason", async () => {
+  const c = await connect();
+  process.env.FAKE_OMP_SCRIPT = JSON.stringify({
+    providerError: { status: 402, message: "402 Insufficient Balance" },
+  });
+  const workdir = mkdtempSync(join(tmpdir(), "omp-dispatch-w-"));
+  const fg: any = await call(c, "omp_agent", { description: "broke", prompt: "go", name: "broke", workdir });
+  expect(fg.isError).toBe(true);
+  expect(fg.content[0].text).toContain("402 Insufficient Balance");
+  const bg: any = await call(c, "omp_agent", {
+    description: "broke2", prompt: "go", name: "broke2", run_in_background: true, workdir,
+  });
+  expect(bg.isError).toBeFalsy();
+  const r: any = await call(c, "omp_task_output", { name: "broke2", wait_seconds: 5 });
+  expect(r.isError).toBe(true);
+  expect(r.content[0].text).toContain("402 Insufficient Balance");
+});

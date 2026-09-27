@@ -8,7 +8,7 @@ import { ensureUserConfig, loadTierConfig } from "../models.ts";
 import { startRun } from "../runner.ts";
 import {
   AGENT_DEFAULTS, capsFor, DEFAULT_REPORTING_PROMPT, pluginVersion, resolveAgentDef,
-  resolveDispatchModel, resultFooter, runningStatus,
+  failureReason, resolveDispatchModel, resultFooter, runningStatus,
 } from "../dispatch.ts";
 import { runDiagnostics } from "../doctor.ts";
 import { readDiff } from "../rundir.ts";
@@ -212,7 +212,7 @@ export function createServer(opts: CreateServerOptions = {}): McpServer {
     const r = handle.result;
     if (r.state === "error") {
       return { isError: true, content: [{ type: "text", text:
-        `run '${name}' did not complete: ${r.stopped_because}. See ${handle.runDir}/progress.log for details.` }] };
+        `run '${name}' did not complete: ${failureReason(r)}. See ${handle.runDir}/progress.log for details.` }] };
     }
     return { content: [{ type: "text", text:
       (r.last_reply ?? "(no reply)") + resultFooter(name, r, { runDir: handle.runDir }) }] };
@@ -456,7 +456,7 @@ export function createServer(opts: CreateServerOptions = {}): McpServer {
             // failure it is explaining.
             let message =
               `omp_agent: run '${runName}' (${runId}) did not complete: ` +
-              `${result.stopped_because ?? "error"}. See ${runDir}/progress.log for details.${isolationNote}`;
+              `${failureReason(result)}. See ${runDir}/progress.log for details.${isolationNote}`;
             try {
               message += `\n\n${(await runDiagnostics(baseWorkdir)).text}`;
             } catch { /* the failure itself is the message */ }
@@ -693,7 +693,7 @@ export function createServer(opts: CreateServerOptions = {}): McpServer {
           const r = await liveHandle.settled;
           if (r.state === "error") {
             throw new Error(
-              `omp_send_message: resumed run '${to}' did not complete: ${r.stopped_because}. ` +
+              `omp_send_message: resumed run '${to}' did not complete: ${failureReason(r)}. ` +
               `See ${liveHandle.runDir}/progress.log for details.`,
             );
           }

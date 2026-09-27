@@ -8,7 +8,8 @@
  *     nonTerminalFirst: boolean, askOnTurn: number | null,
  *     turnDelayMs: number, crashAfterPrompt: boolean, readyDelayMs: number,
  *     hangAfterPrompt: boolean, streamOnlyMs: number,
- *     spawnGrandchild: boolean, statsFailAfter: number | null }
+ *     spawnGrandchild: boolean, statsFailAfter: number | null,
+ *     providerError: { status: number, message: string } | null }
  *
  * FAKE_OMP_DUMP, when set, names a path this process writes its own argv,
  * cwd and CLAUDE_CONFIG_DIR to, so a test can assert what the host actually
@@ -54,6 +55,10 @@ const spawnGrandchild: boolean = script.spawnGrandchild ?? false;
 // exercised on its own. A fake that crashed instead would end the run by the
 // separate child-exited route and prove nothing about the escalation.
 const statsFailAfter: number | null = script.statsFailAfter ?? null;
+// The provider refuses the request (a 402 for no credit, a 429 for an
+// expired plan): omp still ends the turn with a terminal agent_end, but its
+// last assistant message carries stopReason "error" and no content.
+const providerError: { status: number; message: string } | null = script.providerError ?? null;
 
 interface RpcCommand {
   id?: string;
@@ -157,7 +162,14 @@ async function runTurn() {
   if (nonTerminalFirst && turns === 1) {
     out({ type: "agent_end", messages: [], isTerminal: false });   // must NOT count
   }
-  out({ type: "agent_end", messages: [], isTerminal: true });
+  out({
+    type: "agent_end",
+    messages: providerError ? [{
+      role: "assistant", content: [], stopReason: "error",
+      errorStatus: providerError.status, errorMessage: providerError.message,
+    }] : [],
+    isTerminal: true,
+  });
 }
 
 for await (const line of console) {

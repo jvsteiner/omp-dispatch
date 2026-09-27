@@ -7115,7 +7115,8 @@ function emptyResult(runId) {
     ask: null,
     workdir: null,
     worktree_base: null,
-    max_seconds: null
+    max_seconds: null,
+    error: null
   };
 }
 function writeResult(runDir, r) {
@@ -7386,6 +7387,10 @@ function capsFor(def, overrides) {
     maxUsd: overrides?.maxUsd ?? AGENT_DEFAULTS.maxUsd,
     maxSeconds: overrides?.maxSeconds ?? AGENT_DEFAULTS.maxSeconds
   };
+}
+function failureReason(result) {
+  const reason = result.stopped_because ?? "error";
+  return result.error ? `${reason} \u2014 ${result.error}` : reason;
 }
 function resultFooter(name, result, opts = {}) {
   const modelLabel = result.model ? `${result.model.provider}/${result.model.id}` : opts.modelLabel ?? "";
@@ -20779,6 +20784,16 @@ function ompCommand() {
     throw new Error("cannot find omp: it is not on PATH and @oh-my-pi/pi-coding-agent is not " + "resolvable from this plugin. Install omp and make sure `omp --version` works.");
   }
 }
+function providerError(messages) {
+  if (!Array.isArray(messages))
+    return null;
+  const last = [...messages].reverse().find((m) => m?.role === "assistant");
+  if (last?.stopReason !== "error")
+    return null;
+  const text = typeof last.errorMessage === "string" && last.errorMessage.trim() ? last.errorMessage.trim() : "the provider returned an error";
+  const status = typeof last.errorStatus === "number" ? String(last.errorStatus) : null;
+  return status && !text.includes(status) ? `${status} ${text}` : text;
+}
 var MAX_STATS_FAILURES = 3;
 var TERMINATION_GRACE_MS = 2000;
 function buildOmpArgs(opts) {
@@ -20809,8 +20824,9 @@ async function startRun(opts, runDir, runId) {
   } catch (e) {
     result.stopped_because = "error";
     result.state = "error";
+    result.error = e instanceof Error ? e.message : String(e);
     writeResult(runDir, result);
-    appendProgress(runDir, `ERROR ${e instanceof Error ? e.message : String(e)}`);
+    appendProgress(runDir, `ERROR ${result.error}`);
     appendProgress(runDir, "END error \u2014 could not load omp's RpcClient");
     const neverStarted = async () => {
       throw new Error(`run ${runId}: never started \u2014 could not load omp's RpcClient`);
@@ -21107,6 +21123,13 @@ async function startRun(opts, runDir, runId) {
       result.turns = state.turns;
       writeResult(runDir, result);
       appendProgress(runDir, `turn ${state.turns} \u2014 $${state.costUsd.toFixed(4)}`);
+      const refusal = providerError(event.messages);
+      if (refusal) {
+        result.error = refusal;
+        appendProgress(runDir, `ERROR provider: ${refusal}`);
+        await finish("error");
+        return;
+      }
       if (!ok)
         return;
       const b = breach(state, caps);
@@ -21389,7 +21412,7 @@ Full report: ${join11(handle.runDir, "result.json")} (last_reply). ` + `Diff: ${
     const handle = registry2.get(name);
     const r = handle.result;
     if (r.state === "error") {
-      return { isError: true, content: [{ type: "text", text: `run '${name}' did not complete: ${r.stopped_because}. See ${handle.runDir}/progress.log for details.` }] };
+      return { isError: true, content: [{ type: "text", text: `run '${name}' did not complete: ${failureReason(r)}. See ${handle.runDir}/progress.log for details.` }] };
     }
     return { content: [{ type: "text", text: (r.last_reply ?? "(no reply)") + resultFooter(name, r, { runDir: handle.runDir }) }] };
   };
@@ -21500,7 +21523,7 @@ Full report: ${join11(handle.runDir, "result.json")} (last_reply). ` + `Diff: ${
           if (!run_in_background)
             registry2.remove(runName);
           await handle.dispose();
-          let message = `omp_agent: run '${runName}' (${runId}) did not complete: ` + `${result.stopped_because ?? "error"}. See ${runDir}/progress.log for details.${isolationNote}`;
+          let message = `omp_agent: run '${runName}' (${runId}) did not complete: ` + `${failureReason(result)}. See ${runDir}/progress.log for details.${isolationNote}`;
           try {
             message += `
 
@@ -21644,7 +21667,7 @@ ${diff}` : `
       if (resumedFromDisk) {
         const r = await liveHandle.settled;
         if (r.state === "error") {
-          throw new Error(`omp_send_message: resumed run '${to}' did not complete: ${r.stopped_because}. ` + `See ${liveHandle.runDir}/progress.log for details.`);
+          throw new Error(`omp_send_message: resumed run '${to}' did not complete: ${failureReason(r)}. ` + `See ${liveHandle.runDir}/progress.log for details.`);
         }
         const footer2 = resultFooter(to, r, { runDir: liveHandle.runDir });
         return { content: [{ type: "text", text: (r.last_reply ?? "(no reply)") + footer2 }] };

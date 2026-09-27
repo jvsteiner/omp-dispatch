@@ -252,7 +252,8 @@ function emptyResult(runId) {
     ask: null,
     workdir: null,
     worktree_base: null,
-    max_seconds: null
+    max_seconds: null,
+    error: null
   };
 }
 function writeResult(runDir, r) {
@@ -457,6 +458,16 @@ function ompCommand() {
     throw new Error("cannot find omp: it is not on PATH and @oh-my-pi/pi-coding-agent is not " + "resolvable from this plugin. Install omp and make sure `omp --version` works.");
   }
 }
+function providerError(messages) {
+  if (!Array.isArray(messages))
+    return null;
+  const last = [...messages].reverse().find((m) => m?.role === "assistant");
+  if (last?.stopReason !== "error")
+    return null;
+  const text = typeof last.errorMessage === "string" && last.errorMessage.trim() ? last.errorMessage.trim() : "the provider returned an error";
+  const status = typeof last.errorStatus === "number" ? String(last.errorStatus) : null;
+  return status && !text.includes(status) ? `${status} ${text}` : text;
+}
 var MAX_STATS_FAILURES = 3;
 var TERMINATION_GRACE_MS = 2000;
 function buildOmpArgs(opts) {
@@ -487,8 +498,9 @@ async function startRun(opts, runDir, runId) {
   } catch (e) {
     result.stopped_because = "error";
     result.state = "error";
+    result.error = e instanceof Error ? e.message : String(e);
     writeResult(runDir, result);
-    appendProgress(runDir, `ERROR ${e instanceof Error ? e.message : String(e)}`);
+    appendProgress(runDir, `ERROR ${result.error}`);
     appendProgress(runDir, "END error \u2014 could not load omp's RpcClient");
     const neverStarted = async () => {
       throw new Error(`run ${runId}: never started \u2014 could not load omp's RpcClient`);
@@ -785,6 +797,13 @@ async function startRun(opts, runDir, runId) {
       result.turns = state.turns;
       writeResult(runDir, result);
       appendProgress(runDir, `turn ${state.turns} \u2014 $${state.costUsd.toFixed(4)}`);
+      const refusal = providerError(event.messages);
+      if (refusal) {
+        result.error = refusal;
+        appendProgress(runDir, `ERROR provider: ${refusal}`);
+        await finish("error");
+        return;
+      }
       if (!ok)
         return;
       const b = breach(state, caps);
@@ -1152,6 +1171,10 @@ function capsFor(def, overrides) {
     maxSeconds: overrides?.maxSeconds ?? AGENT_DEFAULTS.maxSeconds
   };
 }
+function failureReason(result) {
+  const reason = result.stopped_because ?? "error";
+  return result.error ? `${reason} \u2014 ${result.error}` : reason;
+}
 function resultFooter(name, result, opts = {}) {
   const modelLabel = result.model ? `${result.model.provider}/${result.model.id}` : opts.modelLabel ?? "";
   const parts = [
@@ -1491,6 +1514,8 @@ async function cmdStart(argv, opts) {
     }) + isolationNote + `
 `);
     if (result.state === "error") {
+      err(`dispatch: run '${name}' did not complete: ${failureReason(result)}
+`);
       try {
         err(`
 ${(await runDiagnostics(baseWorkdir)).text}

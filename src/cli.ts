@@ -10,7 +10,7 @@ import {
 import { createWorktree, type Worktree } from "./worktree.ts";
 import { runDiagnostics } from "./doctor.ts";
 import {
-  AGENT_DEFAULTS, capsFor, DEFAULT_REPORTING_PROMPT, resolveAgentDef,
+  AGENT_DEFAULTS, capsFor, DEFAULT_REPORTING_PROMPT, failureReason, resolveAgentDef,
   resolveDispatchModel, resultFooter, runningStatus,
 } from "./dispatch.ts";
 import { uniqueName } from "./mcp/runs.ts";
@@ -257,6 +257,7 @@ async function cmdStart(argv: string[], opts: CliOptions): Promise<number> {
       // Self-diagnosing failure, same rationale as omp_agent's error path:
       // the doctor rides along with the failure, one command and one
       // approval instead of two. Never masks the failure it explains.
+      err(`dispatch: run '${name}' did not complete: ${failureReason(result)}\n`);
       try {
         err(`\n${(await runDiagnostics(baseWorkdir)).text}\n`);
       } catch { /* the failure itself is the message */ }

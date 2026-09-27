@@ -801,3 +801,15 @@ test("an RpcClient that cannot load settles the run as an error before anything 
   expect(log).toContain("not a JS install");
   expect(log).toContain("END error");
 }, 30_000);
+
+test("a provider refusal ends the run as an error that carries the provider's message", async () => {
+  // omp reports the refusal inside a normal terminal agent_end — only the
+  // last assistant message's stopReason says the turn failed. Read as a
+  // clean finish it came back "completed" with no reply and no reason.
+  const s = setup({ providerError: { status: 402, message: "402 Insufficient Balance" } });
+  const r = await runToSettled(s);
+  expect(r.state).toBe("error");
+  expect(r.stopped_because).toBe("error");
+  expect(r.error).toContain("402 Insufficient Balance");
+  expect(readFileSync(join(s.runDir, "progress.log"), "utf8")).toContain("402 Insufficient Balance");
+}, 30_000);

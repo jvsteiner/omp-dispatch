@@ -92,6 +92,22 @@ function ompCommand(): string[] {
   }
 }
 
+/**
+ * The provider's reason when an agent_end's last assistant message stopped
+ * on an error, else null. omp puts the HTTP status and the provider's text on
+ * that message (errorStatus, errorMessage); the text usually carries the
+ * status already, so it is only prefixed when it does not.
+ */
+function providerError(messages: unknown): string | null {
+  if (!Array.isArray(messages)) return null;
+  const last = [...messages].reverse().find(m => m?.role === "assistant");
+  if (last?.stopReason !== "error") return null;
+  const text = typeof last.errorMessage === "string" && last.errorMessage.trim()
+    ? last.errorMessage.trim() : "the provider returned an error";
+  const status = typeof last.errorStatus === "number" ? String(last.errorStatus) : null;
+  return status && !text.includes(status) ? `${status} ${text}` : text;
+}
+
 // A stats call that fails this many times in a row means something is
 // genuinely wrong (not a one-off blip) — see the "budget cap silently
 // disappears" finding. Small on purpose: 3 gives one or two turns' worth of
@@ -177,8 +193,9 @@ export async function startRun(
   } catch (e) {
     result.stopped_because = "error";
     result.state = "error";
+    result.error = e instanceof Error ? e.message : String(e);
     writeResult(runDir, result);
-    appendProgress(runDir, `ERROR ${e instanceof Error ? e.message : String(e)}`);
+    appendProgress(runDir, `ERROR ${result.error}`);
     appendProgress(runDir, "END error — could not load omp's RpcClient");
     const neverStarted = async () => {
       throw new Error(`run ${runId}: never started — could not load omp's RpcClient`);
@@ -671,6 +688,18 @@ export async function startRun(
       result.turns = state.turns;
       writeResult(runDir, result);
       appendProgress(runDir, `turn ${state.turns} — $${state.costUsd.toFixed(4)}`);
+
+      // A provider refusal (no credit, an expired plan, a rejected key) still
+      // arrives as a normal terminal agent_end; only the last assistant
+      // message's stopReason says the turn failed. It beats a stats failure,
+      // a cap and a pending follow-up alike: nothing further can run.
+      const refusal = providerError(event.messages);
+      if (refusal) {
+        result.error = refusal;
+        appendProgress(runDir, `ERROR provider: ${refusal}`);
+        await finish("error");
+        return;
+      }
       if (!ok) return;
 
       const b = breach(state, caps);

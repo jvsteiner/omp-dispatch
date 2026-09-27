@@ -176,6 +176,16 @@ export function capsFor(def: AgentDef | undefined, overrides?: {
  * runner.ts) and the diff pointer names a patch the supervisor can read
  * without running git itself — one approval-free review surface.
  */
+/**
+ * Why a run did not complete, for an error message: the stop reason, then
+ * the cause in the run's own words when it recorded one (a provider's 402,
+ * an omp that cannot be loaded) — so the caller need not open progress.log.
+ */
+export function failureReason(result: RunResult): string {
+  const reason = result.stopped_because ?? "error";
+  return result.error ? `${reason} — ${result.error}` : reason;
+}
+
 export function resultFooter(
   name: string,
   result: RunResult,

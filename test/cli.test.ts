@@ -235,3 +235,13 @@ test("a settled run's result.json carries everything a disk reader needs", async
   expect(raw).toContain("\"stopped_because\": \"completed\"");
   expect(existsSync(join(run.dir, "progress.log"))).toBe(true);
 });
+
+test("a provider refusal prints the provider's reason, not just (no reply)", async () => {
+  process.env.FAKE_OMP_SCRIPT = JSON.stringify({
+    providerError: { status: 402, message: "402 Insufficient Balance" },
+  });
+  const r = await cli(["start", "--prompt", "go", "--workdir", mkdtempSync(join(tmpdir(), "omp-cli-work-"))]);
+  expect(r.code).toBe(1);
+  expect(r.out).toContain("stopped_because=error");
+  expect(r.err).toContain("did not complete: error — 402 Insufficient Balance");
+});

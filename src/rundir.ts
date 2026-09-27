@@ -36,6 +36,12 @@ export interface RunResult {
   worktree_base: string | null;
   /** The run's wall-clock cap, so a live status line can show elapsed/budget. */
   max_seconds: number | null;
+  /**
+   * Why an errored run failed, in words a caller can act on — a provider's
+   * refusal ("402 Insufficient Balance"), an omp that cannot be loaded.
+   * Null otherwise; absent on runs recorded before this field existed.
+   */
+  error?: string | null;
 }
 
 let counter = 0;
@@ -120,7 +126,7 @@ export function emptyResult(runId: string): RunResult {
     run_id: runId, name: null, state: "running", stopped_because: null,
     turns: 0, tool_calls: 0, cost_usd: 0, seconds: 0,
     model: null, session_file: null, files_changed: [], last_reply: null, ask: null,
-    workdir: null, worktree_base: null, max_seconds: null,
+    workdir: null, worktree_base: null, max_seconds: null, error: null,
   };
 }
 

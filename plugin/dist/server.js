@@ -7322,12 +7322,16 @@ function discoverAgentDefs(cwd, home) {
 import { readFileSync as readFileSync5, statSync as statSync2 } from "fs";
 import { dirname, join as join5 } from "path";
 function pluginVersion() {
-  try {
-    const manifest = join5(dirname(import.meta.path), "..", "package.json");
-    return JSON.parse(readFileSync5(manifest, "utf8")).version ?? "0.0.0";
-  } catch {
-    return "0.0.0";
+  const here = dirname(import.meta.path);
+  for (const manifest of [
+    join5(here, "..", ".claude-plugin", "plugin.json"),
+    join5(here, "..", "plugin", ".claude-plugin", "plugin.json")
+  ]) {
+    try {
+      return JSON.parse(readFileSync5(manifest, "utf8")).version ?? "0.0.0";
+    } catch {}
   }
+  return "0.0.0";
 }
 var AGENT_DEFAULTS = {
   tools: "read,write,edit,bash",

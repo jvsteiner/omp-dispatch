@@ -103,12 +103,14 @@ omp does not work. omp must be version `^18.1.17`; `--doctor` checks both.
 
 | Path | Purpose |
 |---|---|
-| `.claude-plugin/` | Claude manifest and marketplace (also readable by Codex) |
-| `.codex-plugin/plugin.json`, `.mcp.json` | Codex manifest and MCP launch configuration (plugin-root-relative) |
+| `.claude-plugin/marketplace.json` | The marketplace, read by both hosts. It points at `plugin/`. |
+| `plugin/` | The installed plugin, and nothing else. Both hosts copy only this folder. |
+| `plugin/.claude-plugin/`, `plugin/.codex-plugin/`, `plugin/.mcp.json` | Claude and Codex manifests, and Codex's MCP launch configuration (plugin-root-relative) |
+| `plugin/dist/` | The bundles both hosts run, built from `bin/` and `src/` by `bun run build`. Rebuild after any source change; a packaging test fails when `plugin/dist/` is stale. |
+| `plugin/skills/omp-subagents/` | Delegation workflow for both hosts |
+| `plugin/agents/` | Optional Markdown role templates for either host |
 | `src/`, `bin/` | Shared runner, lifecycle, MCP server and the `dispatch` CLI |
-| `dist/` | The bundles both hosts run, built from `bin/` and `src/` by `bun run build`. Rebuild after any source change; a packaging test fails when `dist/` is stale. |
-| `skills/omp-subagents/` | Delegation workflow for both hosts |
-| `agents/` | Optional Markdown role templates for either host |
+| `package.json`, `bun.lock` | Development only: build and test dependencies. They stay out of `plugin/` because Claude Code runs `bun install`, dev dependencies included, in any installed plugin that has a `package.json` and a lockfile. |
 | `docs/codex.md` | Codex installation, limitations and examples |
 
 Both hosts discover role definitions in project `.omp-dispatch/agents/`,

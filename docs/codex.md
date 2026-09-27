@@ -28,8 +28,9 @@ codex plugin add omp-dispatch@omp-dispatch
 ```
 
 The existing `.claude-plugin/marketplace.json` is a supported legacy marketplace
-and points to the repository root. Codex selects `.codex-plugin/plugin.json`;
-Claude Code selects `.claude-plugin/plugin.json`. Both load the same skill and
+and points to `plugin/`, the folder both hosts install. Codex selects
+`plugin/.codex-plugin/plugin.json`; Claude Code selects
+`plugin/.claude-plugin/plugin.json`. Both load the same skill and
 launcher, but they address it differently, and the difference is load-bearing:
 Codex expands no variables at all (verified against its binary — there is no
 `${...}` support). Its `.mcp.json` anchors the launch with `"cwd": "./"` —
@@ -38,9 +39,9 @@ relative to that cwd (`dist/server.js`). Args alone are process-cwd-relative,
 which only works by accident inside a checkout of this repo. Claude Code does expand
 `${CLAUDE_PLUGIN_ROOT}`, but only inside its own plugin manifest, which is why
 the Claude manifest carries the variable inline and the shared file does not.
-Working in a checkout of this repo, Claude Code may offer the root `.mcp.json`
-as a project server; the committed `.claude/settings.json` declines it so the
-plugin's server is the only one registered.
+The `.mcp.json` lives in `plugin/`, not the repository root, so Claude Code
+working in a checkout of this repo does not offer it as a second project
+server.
 
 Open a new Codex conversation after installation. Invoke `$omp-subagents` and
 ask it to call `omp_ping`, then delegate a small read-only task. If the app
@@ -52,7 +53,7 @@ After publishing these changes, the marketplace can also be added using
 `codex plugin marketplace upgrade omp-dispatch`, then start a new conversation.
 
 If the server ever fails to start or the `omp_*` tools are missing, run
-`bun /absolute/path/to/omp-dispatch/dist/server.js --doctor --workdir <project>`
+`bun /absolute/path/to/omp-dispatch/plugin/dist/server.js --doctor --workdir <project>`
 — it works without a working server and names what to fix.
 
 ## Manual MCP setup
@@ -63,13 +64,13 @@ For clients without plugin installation, add this to `~/.codex/config.toml`
 ```toml
 [mcp_servers.omp-dispatch]
 command = "bun"
-args = ["/absolute/path/to/omp-dispatch/dist/server.js"]
+args = ["/absolute/path/to/omp-dispatch/plugin/dist/server.js"]
 startup_timeout_sec = 120
 tool_timeout_sec = 60
 ```
 
 Use an absolute checkout path, not a plugin-root variable, in this manual
-configuration. Install the skill by copying `skills/omp-subagents/` into your
+configuration. Install the skill by copying `plugin/skills/omp-subagents/` into your
 project's `.agents/skills/` or `~/.agents/skills/`. Choose either plugin or
 manual MCP installation to avoid starting two independent registries.
 

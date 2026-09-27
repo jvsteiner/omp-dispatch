@@ -5,20 +5,21 @@ import { join } from "node:path";
 import { parseAgentDef } from "../src/agentdef.ts";
 
 const root = join(import.meta.dir, "..");
+const plugin = join(root, "plugin");
 
 test("Codex and Claude packages share the version, skill and dependency-installing launcher", () => {
-  const codex = JSON.parse(readFileSync(join(root, ".codex-plugin/plugin.json"), "utf8"));
-  const claude = JSON.parse(readFileSync(join(root, ".claude-plugin/plugin.json"), "utf8"));
+  const codex = JSON.parse(readFileSync(join(plugin, ".codex-plugin/plugin.json"), "utf8"));
+  const claude = JSON.parse(readFileSync(join(plugin, ".claude-plugin/plugin.json"), "utf8"));
   expect(codex.name).toBe(claude.name);
   expect(codex.version).toBe(claude.version);
   expect(codex.skills).toBe(claude.skills);
   // Same launcher, two addressings: Codex gets a plugin-root-relative path
   // (it expands nothing), Claude gets ${CLAUDE_PLUGIN_ROOT} (its plugin
   // loader expands it). The detailed contract lives in the test below.
-  const mcp = JSON.parse(readFileSync(join(root, codex.mcpServers), "utf8"));
+  const mcp = JSON.parse(readFileSync(join(plugin, codex.mcpServers), "utf8"));
   expect(mcp.mcpServers["omp-dispatch"].command).toBe(claude.mcpServers["omp-dispatch"].command);
   const relative = mcp.mcpServers["omp-dispatch"].args[0];
-  expect(existsSync(join(root, relative))).toBe(true);
+  expect(existsSync(join(plugin, relative))).toBe(true);
 });
 
 test("the two hosts' launch contracts both hold: cwd-anchored .mcp.json for Codex, inline variable for Claude", () => {
@@ -29,29 +30,27 @@ test("the two hosts' launch contracts both hold: cwd-anchored .mcp.json for Code
   // the cwd field, and the args must be relative to IT: "cwd": "./" +
   // "dist/server.js". A bare relative arg (0.2.5) only worked in a checkout
   // of this very repo, because the repo happened to contain the path.
-  const codex = JSON.parse(readFileSync(join(root, ".codex-plugin/plugin.json"), "utf8"));
+  const codex = JSON.parse(readFileSync(join(plugin, ".codex-plugin/plugin.json"), "utf8"));
   expect(codex.mcpServers).toBe("./.mcp.json");
-  const mcp = JSON.parse(readFileSync(join(root, ".mcp.json"), "utf8"));
+  const mcp = JSON.parse(readFileSync(join(plugin, ".mcp.json"), "utf8"));
   const entry = mcp.mcpServers["omp-dispatch"];
   expect(entry.cwd).toBe("./");
   expect(entry.args.join(" ")).not.toContain("${");
-  expect(existsSync(join(root, entry.cwd, entry.args[0]))).toBe(true);
+  expect(existsSync(join(plugin, entry.cwd, entry.args[0]))).toBe(true);
   // Claude Code expands ${CLAUDE_PLUGIN_ROOT} in its own inline plugin
   // manifest — the one place the variable is actually supported — and its
   // plugin cache is never a project root, so the variable is correct there.
-  const claude = JSON.parse(readFileSync(join(root, ".claude-plugin/plugin.json"), "utf8"));
+  const claude = JSON.parse(readFileSync(join(plugin, ".claude-plugin/plugin.json"), "utf8"));
   expect(claude.mcpServers["omp-dispatch"].args[0]).toContain("${CLAUDE_PLUGIN_ROOT}");
 
-  // A checkout's root .mcp.json is ALSO auto-loadable project config in
-  // Claude Code; the relative path makes even that work, but a duplicate
-  // server beside the plugin's is noise — the project settings file declines
-  // it once, for everyone who works in a checkout.
-  const settings = JSON.parse(readFileSync(join(root, ".claude", "settings.json"), "utf8"));
-  expect(settings.disabledMcpjsonServers).toContain("omp-dispatch");
+  // A root .mcp.json would be auto-loadable project config for anyone
+  // working in a checkout: a second server beside the installed plugin's.
+  // Codex's .mcp.json lives in plugin/, so the checkout root carries none.
+  expect(existsSync(join(root, ".mcp.json"))).toBe(false);
 });
 
 test("the plugin manifest declares the MCP server and the skills directory", () => {
-  const m = JSON.parse(readFileSync(join(root, ".claude-plugin/plugin.json"), "utf8"));
+  const m = JSON.parse(readFileSync(join(plugin, ".claude-plugin/plugin.json"), "utf8"));
   expect(m.name).toBe("omp-dispatch");
   expect(m.version).toMatch(/^\d+\.\d+\.\d+$/);
   expect(m.mcpServers["omp-dispatch"].args[0]).toContain("${CLAUDE_PLUGIN_ROOT}");
@@ -64,19 +63,19 @@ test("the marketplace manifest points at this plugin", () => {
 });
 
 test("the skill has front matter with a name and a description", () => {
-  const s = readFileSync(join(root, "skills/omp-subagents/SKILL.md"), "utf8");
+  const s = readFileSync(join(plugin, "skills/omp-subagents/SKILL.md"), "utf8");
   expect(s.startsWith("---")).toBe(true);
   expect(s).toMatch(/^name:\s*omp-subagents$/m);
   expect(s).toMatch(/^description:\s*\S/m);
 });
 
 test("the skill states when to use a native subagent instead", () => {
-  const s = readFileSync(join(root, "skills/omp-subagents/SKILL.md"), "utf8");
+  const s = readFileSync(join(plugin, "skills/omp-subagents/SKILL.md"), "utf8");
   expect(s).toMatch(/native subagent when/i);
 });
 
 test("the skill documents every tool the server actually registers", () => {
-  const s = readFileSync(join(root, "skills/omp-subagents/SKILL.md"), "utf8");
+  const s = readFileSync(join(plugin, "skills/omp-subagents/SKILL.md"), "utf8");
   const server = readFileSync(join(root, "src/mcp/server.ts"), "utf8");
   const registered = [...server.matchAll(/server\.tool\(\s*"([a-z_]+)"/g)].map(m => m[1]!);
   expect(registered.length).toBeGreaterThan(5);
@@ -87,7 +86,7 @@ test("the skill documents every tool the server actually registers", () => {
 });
 
 test("every shipped agent definition parses with no dropped tools", () => {
-  const dir = join(root, "agents");
+  const dir = join(plugin, "agents");
   const files = readdirSync(dir).filter(f => f.endsWith(".md"));
   expect(files.length).toBeGreaterThan(0);
   for (const f of files) {
@@ -113,9 +112,9 @@ test("the README exists and explains how to turn this on", () => {
 test("both manifests launch the committed bundle", () => {
   // A marketplace install is a git clone with no install step, so what the
   // manifests launch must be complete on its own: one bundled file.
-  const claude = JSON.parse(readFileSync(join(root, ".claude-plugin/plugin.json"), "utf8"));
+  const claude = JSON.parse(readFileSync(join(plugin, ".claude-plugin/plugin.json"), "utf8"));
   expect(claude.mcpServers["omp-dispatch"].args[0]).toBe("${CLAUDE_PLUGIN_ROOT}/dist/server.js");
-  const mcp = JSON.parse(readFileSync(join(root, ".mcp.json"), "utf8"));
+  const mcp = JSON.parse(readFileSync(join(plugin, ".mcp.json"), "utf8"));
   expect(mcp.mcpServers["omp-dispatch"].args[0]).toBe("dist/server.js");
   const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
   expect(pkg.dependencies ?? {}).toEqual({});
@@ -135,7 +134,7 @@ test("dist/ holds the build of the current source", async () => {
   const tmp = mkdtempSync(join(tmpdir(), "omp-build-"));
   for (const [entry, out] of [["bin/server.ts", "server.js"], ["bin/dispatch.ts", "dispatch.js"]]) {
     await Bun.$`bun build ${entry} --target=bun --outfile ${join(tmp, out)}`.cwd(root).quiet();
-    expect(readFileSync(join(root, "dist", out), "utf8")).toBe(readFileSync(join(tmp, out), "utf8"));
+    expect(readFileSync(join(plugin, "dist", out), "utf8")).toBe(readFileSync(join(tmp, out), "utf8"));
   }
 });
 
@@ -143,7 +142,7 @@ test("the bundle does not contain omp's native addon loader", () => {
   // RpcClient drags it in, and it cannot load without omp's node_modules;
   // RpcClient comes from the omp on PATH instead (src/ompinstall.ts).
   for (const f of ["server.js", "dispatch.js"]) {
-    expect(readFileSync(join(root, "dist", f), "utf8")).not.toContain("pi_natives native addon");
+    expect(readFileSync(join(plugin, "dist", f), "utf8")).not.toContain("pi_natives native addon");
   }
 });
 
@@ -159,13 +158,13 @@ test("package.json carries a version and matches the manifest", () => {
   // It had none at all, so a version bump silently skipped it and the server
   // fell back to 0.0.0. A missing field is easy to not notice.
   const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
-  const plug = JSON.parse(readFileSync(join(root, ".claude-plugin/plugin.json"), "utf8"));
+  const plug = JSON.parse(readFileSync(join(plugin, ".claude-plugin/plugin.json"), "utf8"));
   expect(pkg.version).toMatch(/^\d+\.\d+\.\d+$/);
   expect(pkg.version).toBe(plug.version);
 });
 
 test("plugin and marketplace manifests agree on the version", () => {
-  const p = JSON.parse(readFileSync(join(root, ".claude-plugin/plugin.json"), "utf8"));
+  const p = JSON.parse(readFileSync(join(plugin, ".claude-plugin/plugin.json"), "utf8"));
   const m = JSON.parse(readFileSync(join(root, ".claude-plugin/marketplace.json"), "utf8"));
   const entry = m.plugins.find((x: any) => x.name === "omp-dispatch");
   // A marketplace install resolves the version from the marketplace entry, so
@@ -189,7 +188,7 @@ test("the MCP server reports the version the package actually is", async () => {
   await Promise.all([createServer().connect(a), client.connect(b)]);
 
   const declared = JSON.parse(
-    readFileSync(join(root, ".claude-plugin/plugin.json"), "utf8"),
+    readFileSync(join(plugin, ".claude-plugin/plugin.json"), "utf8"),
   ).version;
   expect(client.getServerVersion()?.version).toBe(declared);
   await client.close();
@@ -198,7 +197,7 @@ test("the MCP server reports the version the package actually is", async () => {
 test("the bundle's --doctor mode reports and exits without starting a server", async () => {
   // The shipped entry point, run the way a host or a supervising agent runs
   // it: the doctor must work from the bundle alone.
-  const p = Bun.spawn(["bun", join(root, "dist/server.js"), "--doctor", "--workdir", root], {
+  const p = Bun.spawn(["bun", join(plugin, "dist/server.js"), "--doctor", "--workdir", root], {
     stdin: "pipe", stdout: "pipe", stderr: "pipe",
   });
   const timer = setTimeout(() => p.kill(), 20_000);
@@ -212,7 +211,7 @@ test("the bundle serves MCP once: one reply per request", async () => {
   // src/mcp/server.ts starts itself under `if (import.meta.main)`. Bun
   // rewrites that to `if (false)` for every module but the bundle entry; if
   // it ever stopped, a second server would share stdin and answer twice.
-  const p = Bun.spawn(["bun", join(root, "dist/server.js")], {
+  const p = Bun.spawn(["bun", join(plugin, "dist/server.js")], {
     stdin: "pipe", stdout: "pipe", stderr: "pipe",
   });
   p.stdin.write(JSON.stringify({
@@ -228,4 +227,28 @@ test("the bundle serves MCP once: one reply per request", async () => {
   clearTimeout(timer);
   const replies = out.split("\n").filter(l => l.includes('"id":1'));
   expect(replies.length).toBe(1);
+}, 30_000);
+
+test("the marketplace installs plugin/, which carries no package.json or lockfile", () => {
+  // Claude Code runs `bun install` (dev dependencies included, no opt-out)
+  // in any installed plugin root holding a package.json and a lockfile —
+  // 861MB the bundle never uses. The repo root keeps both for development;
+  // the plugin the marketplace points at must hold neither.
+  const m = JSON.parse(readFileSync(join(root, ".claude-plugin/marketplace.json"), "utf8"));
+  const source = m.plugins.find((x: { name: string }) => x.name === "omp-dispatch").source;
+  expect(source).toBe("./plugin");
+  const dir = join(root, source);
+  for (const f of ["package.json", "bun.lock", "bun.lockb", "package-lock.json", "npm-shrinkwrap.json", "node_modules"]) {
+    expect(existsSync(join(dir, f))).toBe(false);
+  }
+  for (const f of [".claude-plugin/plugin.json", ".codex-plugin/plugin.json", ".mcp.json", "dist/server.js", "dist/dispatch.js", "skills/omp-subagents/SKILL.md", "LICENSE"]) {
+    expect(existsSync(join(dir, f))).toBe(true);
+  }
+});
+
+test("the bundle reports the plugin's version from inside plugin/", async () => {
+  // plugin/ has no package.json, so the bundle must read its own manifest.
+  const version = JSON.parse(readFileSync(join(plugin, ".claude-plugin/plugin.json"), "utf8")).version;
+  const out = await Bun.$`bun ${join(plugin, "dist/server.js")} --doctor --workdir ${root}`.nothrow().quiet().text();
+  expect(out).toContain(`omp-dispatch ${version} doctor`);
 }, 30_000);

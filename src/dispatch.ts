@@ -6,15 +6,19 @@ import { loadTierConfig, resolveModel } from "./models.ts";
 import type { RunResult } from "./rundir.ts";
 
 export function pluginVersion(): string {
-  try {
-    // Both host manifests are kept in step with the shared package version.
-    // import.meta.path is src/dispatch.ts in a checkout and dist/server.js or
-    // dist/dispatch.js in the bundle: one level below package.json either way.
-    const manifest = join(dirname(import.meta.path), "..", "package.json");
-    return JSON.parse(readFileSync(manifest, "utf8")).version ?? "0.0.0";
-  } catch {
-    return "0.0.0";
+  // The Claude plugin manifest; a test keeps every other manifest in step
+  // with it. import.meta.path is plugin/dist/*.js in the bundle, which ships
+  // with no package.json, and src/dispatch.ts in a checkout.
+  const here = dirname(import.meta.path);
+  for (const manifest of [
+    join(here, "..", ".claude-plugin", "plugin.json"),
+    join(here, "..", "plugin", ".claude-plugin", "plugin.json"),
+  ]) {
+    try {
+      return JSON.parse(readFileSync(manifest, "utf8")).version ?? "0.0.0";
+    } catch { /* try the next */ }
   }
+  return "0.0.0";
 }
 
 /**

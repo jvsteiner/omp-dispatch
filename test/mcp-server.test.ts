@@ -42,7 +42,7 @@ test("every advertised tool has a description and an input schema", async () => 
 
 test("the plugin manifest declares the MCP server with a plugin-root path", () => {
   const m = JSON.parse(require("node:fs").readFileSync(
-    `${import.meta.dir}/../.claude-plugin/plugin.json`, "utf8"));
+    `${import.meta.dir}/../plugin/.claude-plugin/plugin.json`, "utf8"));
   const s = m.mcpServers["omp-dispatch"];
   expect(s.command).toBe("bun");
   expect(s.args[0]).toContain("${CLAUDE_PLUGIN_ROOT}");

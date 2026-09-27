@@ -1,14 +1,14 @@
 {
   "name": "omp-dispatch",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "private": true,
   "type": "module",
   "packageManager": "bun@1.4.0",
   "bin": {
-    "dispatch": "./dist/dispatch.js"
+    "dispatch": "./plugin/dist/dispatch.js"
   },
   "scripts": {
-    "build": "bun build bin/server.ts --target=bun --outfile dist/server.js && bun build bin/dispatch.ts --target=bun --outfile dist/dispatch.js"
+    "build": "bun build bin/server.ts --target=bun --outfile plugin/dist/server.js && bun build bin/dispatch.ts --target=bun --outfile plugin/dist/dispatch.js"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
